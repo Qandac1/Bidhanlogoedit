@@ -1,0 +1,19 @@
+services:
+  bidhaan-logoedit:
+    build: .
+    container_name: bidhaan-logoedit
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=UTC
+    volumes:
+      - bot_data:/app/data
+      - ./assets:/app/assets:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot_data:
