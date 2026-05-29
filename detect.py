@@ -39,7 +39,7 @@ class CoverEvent:
     w: float       # normalised 0..1 width
     h: float       # normalised 0..1 height
 
-    def padded(self, px: float = 0.012, py: float = 0.015) -> "CoverEvent":
+    def padded(self, px: float = 0.022, py: float = 0.02) -> "CoverEvent":
         """Grow the box a touch so the bar fully hides the banner edges."""
         x = max(0.0, self.x - px)
         y = max(0.0, self.y - py)
