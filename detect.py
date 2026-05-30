@@ -136,7 +136,14 @@ def _find_red_banners(img: np.ndarray) -> list[tuple[float, float, float, float]
         # red fill density inside the box (reject sparse red speckle)
         sub = mask[y:y + h, x:x + w]
         dense = sub.size > 0 and (cv2.countNonZero(sub) / sub.size) >= 0.45
-        if wide and short and banner_aspect and reasonable_area and in_zone and dense:
+        # a banner has WHITE text/icons on the red (phone number, channel icons);
+        # red clothing/objects don't -> require some white content to reject them
+        sv = hsv[y:y + h, x:x + w]
+        white_frac = (((sv[:, :, 2] > 195) & (sv[:, :, 1] < 60)).mean()
+                      if sv.size else 0.0)
+        has_text = white_frac >= 0.02
+        if (wide and short and banner_aspect and reasonable_area
+                and in_zone and dense and has_text):
             boxes.append((nx, ny, nw, nh))
     return boxes
 
@@ -405,10 +412,9 @@ def detect_ad_banners(
         else:
             bands.append(dict(e))
 
-    # Keep a band if a number/template confirmed it (digits>0) OR it's a
-    # SUSTAINED bar (>=6s) — a real banner persists in place, while red roses /
-    # clothing / scene colour are transient or fail the bar-shape filters.
-    bands = [b for b in bands if b["digits"] > 0 or (b["end"] - b["start"]) >= 6.0]
+    # Every detection here is already a confirmed banner: a red bar WITH white
+    # text, a phone number, or a template match. min_duration/coverage (in the
+    # track stage) drops transient one-offs. So keep them all.
 
     # --- Refine each band's start/end so the cover matches the banner exactly --
     # The coarse interval scan only knows the banner is present at sampled times;
