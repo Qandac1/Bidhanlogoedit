@@ -40,7 +40,7 @@ class CoverEvent:
     h: float       # normalised 0..1 height
     digits: int = 0  # how many keyframes confirmed a phone number in this band
 
-    def padded(self, px: float = 0.018, py: float = 0.012) -> "CoverEvent":
+    def padded(self, px: float = 0.03, py: float = 0.012) -> "CoverEvent":
         """Grow the box just a touch so the bar matches the banner (covers the
         non-red edge) without over-covering — like a Wondershare bar placed on
         the number, not a big block."""
@@ -226,17 +226,25 @@ def detect_ad_banners(
         red_boxes = _find_red_banners(img)
         phone_boxes = _find_phone_boxes(img) if use_ocr else []
 
-        def _phone_here(b):
-            for pb in phone_boxes:
-                same_row = b[1] <= pb[1] + pb[3] * 0.5 <= b[1] + b[3]
-                if _iou(b, pb) > 0.01 or same_row:
-                    return True
-            return False
+        def _samerow(b, pb):
+            return b[1] - 0.05 <= pb[1] + pb[3] * 0.5 <= b[1] + b[3] + 0.05
 
         for rb in red_boxes:
-            dets.append((t, rb, _phone_here(rb), True))
+            # UNION the red bar with any phone-number box on the same row so the
+            # cover spans the FULL number (the red box alone is often narrower
+            # than the digits -> the end of the number was leaking).
+            box = rb
+            phone = False
+            for pb in phone_boxes:
+                if _iou(rb, pb) > 0.005 or _samerow(rb, pb):
+                    ux, uy = min(box[0], pb[0]), min(box[1], pb[1])
+                    ux2 = max(box[0] + box[2], pb[0] + pb[2])
+                    uy2 = max(box[1] + box[3], pb[1] + pb[3])
+                    box = (ux, uy, ux2 - ux, uy2 - uy)
+                    phone = True
+            dets.append((t, box, phone, True))
         for pb in phone_boxes:
-            if not any(_iou(pb, rb) > 0.01 for rb in red_boxes):
+            if not any(_iou(pb, rb) > 0.005 or _samerow(rb, pb) for rb in red_boxes):
                 dets.append((t, pb, True, False))
 
     # cleanup frames to save disk
