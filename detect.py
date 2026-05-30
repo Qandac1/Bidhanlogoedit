@@ -281,7 +281,9 @@ def detect_ad_banners(
         return []
     times = [i / sample_fps for i in range(m)]
     spacing = 1.0 / sample_fps
-    merge_gap = max(merge_gap, 4.0 * spacing, 15.0)
+    # bridge only short gaps (a sliding banner missed for 1-2 samples), NOT long
+    # absences — otherwise an intermittent banner becomes one long over-cover.
+    merge_gap = max(merge_gap, 4.0 * spacing, 12.0)
     log.info("detect: %d frames @%.2ffps (~%.1fs apart), merge_gap=%.0fs",
              m, sample_fps, spacing, merge_gap)
 
@@ -294,7 +296,9 @@ def detect_ad_banners(
         if img is None:
             continue
         red_boxes = _find_red_banners(img)
-        phone_boxes = _find_phone_boxes(img) if use_ocr else []
+        # OCR is the slow step — only run it where there's actually a red bar
+        # (phone banners are red). Massively speeds up long (2h) scans.
+        phone_boxes = _find_phone_boxes(img) if (use_ocr and red_boxes) else []
         tmpl_boxes = _find_template_banners(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
 
         def _samerow(b, pb):
@@ -366,7 +370,7 @@ def detect_ad_banners(
             tracks.append({"start": t, "end": t, "last_t": t, "rep": box,
                            "boxes": [(box, is_red)], "hits": 1, "digits": int(has_dig)})
 
-    LINK_GAP = 60.0
+    LINK_GAP = 12.0   # join same-location events with short gaps, not long absences
 
     # tracks -> events (filtered), carrying member boxes
     step = spacing
