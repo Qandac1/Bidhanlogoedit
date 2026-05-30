@@ -48,7 +48,9 @@ class RenderConfig:
     cover_png: str = ""
     scroll_text: str = ""
     scroll_seconds: float = 25.0   # time the caption takes to travel bottom->up
-    scroll_count: int = 8          # how many times it appears across the video
+    scroll_count: int = 8          # how many times it appears (even spread)
+    scroll_times: list[float] = field(default_factory=list)  # exact start secs;
+    #                              if set, overrides scroll_count
 
     # output / encode (Wondershare-style)
     width: int = 1920
@@ -153,18 +155,29 @@ def build_filter(src_w: int, src_h: int, duration: float,
         parts.append(f"[{cur}][lg{idx}]overlay={_corner_xy(lg.corner, mx, my)}:format=auto[{nxt}]")
         cur = nxt
 
-    # scrolling caption — N appearances spread across the video, each taking
-    # scroll_seconds to travel bottom -> up.
+    # scrolling caption (bottom -> up over scroll_seconds).
     txt = _esc_text(cfg.scroll_text)
-    n = max(1, cfg.scroll_count)
     T = max(2.0, cfg.scroll_seconds)
-    period = max(T, duration / n) if duration > 0 else T
-    parts.append(
-        f"[{cur}]drawtext=fontfile={FONT}:text='{txt}':"
-        f"fontcolor=white:fontsize={fontsize}:borderw=2:bordercolor=black@0.9:"
-        f"x=(w-text_w)/2:"
-        f"y='h-(mod(t,{period:.3f})/{T:.3f})*(h+text_h)':"
-        f"enable='lt(mod(t,{period:.3f}),{T:.3f})'[outv]")
+    base = (f"drawtext=fontfile={FONT}:text='{txt}':fontcolor=white:"
+            f"fontsize={fontsize}:borderw=2:bordercolor=black@0.9:x=(w-text_w)/2")
+    if cfg.scroll_times:
+        # EXACT minute marks the user chose: one pass at each time.
+        ts = sorted(cfg.scroll_times)
+        for i, start in enumerate(ts):
+            lbl = "outv" if i == len(ts) - 1 else f"cap{i}"
+            parts.append(
+                f"[{cur}]{base}:"
+                f"y='h-((t-{start:.2f})/{T:.3f})*(h+text_h)':"
+                f"enable='between(t,{start:.2f},{start + T:.2f})'[{lbl}]")
+            cur = lbl
+    else:
+        # N appearances evenly spread across the video.
+        n = max(1, cfg.scroll_count)
+        period = max(T, duration / n) if duration > 0 else T
+        parts.append(
+            f"[{cur}]{base}:"
+            f"y='h-(mod(t,{period:.3f})/{T:.3f})*(h+text_h)':"
+            f"enable='lt(mod(t,{period:.3f}),{T:.3f})'[outv]")
     return ";".join(parts)
 
 

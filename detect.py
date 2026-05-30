@@ -114,6 +114,36 @@ def _find_red_banners(img: np.ndarray) -> list[tuple[float, float, float, float]
     return boxes
 
 
+def _find_number_banners(img: np.ndarray) -> list[tuple[float, float, float, float]]:
+    """OCR the lower half for phone-number-like digit runs (catches ad numbers
+    even when the banner isn't strongly red). Returns normalised boxes covering
+    the number, widened a little so the whole number is hidden."""
+    if not _HAS_OCR:
+        return []
+    H, W = img.shape[:2]
+    y0 = int(0.52 * H)
+    region = img[y0:, :]
+    boxes: list[tuple[float, float, float, float]] = []
+    try:
+        from pytesseract import Output
+        data = pytesseract.image_to_data(region, config="--psm 11",
+                                         output_type=Output.DICT)
+    except Exception:
+        return []
+    for i, txt in enumerate(data["text"]):
+        digits = sum(c.isdigit() for c in txt)
+        if digits >= 4:                      # phone-number-ish
+            x, y = data["left"][i], data["top"][i]
+            w, h = data["width"][i], data["height"][i]
+            # widen horizontally (numbers sit inside a wider bar)
+            nx = max(0.0, (x - w * 0.4) / W)
+            ny = max(0.0, (y + y0 - h * 0.4) / H)
+            nw = min(1.0 - nx, (w * 1.8) / W)
+            nh = min(1.0 - ny, (h * 1.8) / H)
+            boxes.append((nx, ny, nw, nh))
+    return boxes
+
+
 def _has_digits(img: np.ndarray, box: tuple[float, float, float, float]) -> bool:
     """OCR a crop; True if it looks like it contains a phone-ish digit run."""
     if not _HAS_OCR:
@@ -185,6 +215,10 @@ def detect_ad_banners(
         for box in _find_red_banners(img):
             has_dig = _has_digits(img, box) if use_ocr else True
             dets.append((t, box, has_dig))
+        # OCR phone-number banners (non-red ad numbers) — always digit-backed
+        if use_ocr:
+            for box in _find_number_banners(img):
+                dets.append((t, box, True))
 
     # cleanup frames to save disk
     for fp in files:

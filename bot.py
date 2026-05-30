@@ -50,6 +50,7 @@ DEFAULTS = {
     "scroll_text": "UGAAR AH BIDHAAN TV 0619624090",
     "scroll_seconds": 25.0,
     "scroll_count": 8,           # 0 = continuous (every pass)
+    "scroll_times": [],          # exact minute marks (overrides count when set)
     "cover_mode": "auto",        # auto | off
     "width": 1920, "height": 1080, "fps": 25,
     "bitrate": 2000,             # kbps (video)
@@ -128,7 +129,10 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
     size = estimate_size_bytes(dur, vk, c["audio_k"])
     warn = "  ⚠️ over 2GB" if size > TG_LIMIT else ""
     res = "Source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
-    times = "every pass" if c["scroll_count"] == 0 else f"{c['scroll_count']}×"
+    if c.get("scroll_times"):
+        times = "@ " + ", ".join(f"{x:g}m" for x in c["scroll_times"])
+    else:
+        times = "every pass" if c["scroll_count"] == 0 else f"{c['scroll_count']}×"
     logos = []
     if c["streamnxt_on"]:
         logos.append(f"StreamNxt[{c['streamnxt_corner']}]")
@@ -177,6 +181,7 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
                      f"s:scroll_count:{n}") for n in opts[i:i+4]] for i in (0, 4)]
         rows.append([IKB(("✅ " if c['scroll_count'] == 0 else "") + "Every pass (max)",
                          "s:scroll_count:0")])
+        rows.append([IKB("✏️ Exact minutes → type  /at 1 3 12 24", "noop")])
         return IKM(rows + [_back_row()])
     if which == "br":
         opts = [1500, 2000, 2300, 2700, 3000, 3500]
@@ -227,6 +232,8 @@ HELP = (
     "send it back.\n\n"
     "/settings — show your saved defaults\n"
     "/text `caption` — set the scrolling caption\n"
+    "/at `1 3 12 24` — show the caption at exact minute marks "
+    "(send `/at` alone to clear)\n"
 )
 
 
@@ -259,6 +266,29 @@ async def _text(_, m: Message):
     new = m.text.split(None, 1)[1].strip()
     set_user(m.from_user.id, scroll_text=new)
     await m.reply(f"✅ Caption set:\n`{new}`")
+
+
+@app.on_message(filters.command("at") & filters.private)
+async def _at(_, m: Message):
+    if not _allowed(m.from_user.id):
+        return
+    args = m.command[1:]
+    if not args:
+        set_user(m.from_user.id, scroll_times=[])
+        return await m.reply("✅ Cleared exact times — caption now uses the "
+                             "**Times** (even spread) setting again.")
+    mins = []
+    for a in args:
+        try:
+            mins.append(float(a.replace(",", ".")))
+        except ValueError:
+            return await m.reply(f"`{a}` isn't a number. Example:\n"
+                                 "`/at 1 3 12 24 52 119`  (minutes)")
+    mins = sorted(set(mins))
+    set_user(m.from_user.id, scroll_times=mins)
+    await m.reply("✅ Caption will appear at: " +
+                  ", ".join(f"{x:g}min" for x in mins) +
+                  "\n(Send `/at` with no numbers to go back to even spread.)")
 
 
 @app.on_message((filters.video | filters.document) & filters.private)
@@ -294,6 +324,10 @@ async def _cb(_, cq: CallbackQuery):
     job = _pending.get(uid)
     data = cq.data
 
+    if data == "noop":
+        return await cq.answer("Type:  /at 1 3 12 24 52   (minutes you want it shown)",
+                               show_alert=True)
+
     if data == "cancel":
         _pending.pop(uid, None)
         await cq.message.edit("❌ Cancelled.")
@@ -317,7 +351,7 @@ async def _cb(_, cq: CallbackQuery):
         if key == "scroll_seconds":
             set_user(uid, scroll_seconds=float(val))
         elif key == "scroll_count":
-            set_user(uid, scroll_count=int(val))
+            set_user(uid, scroll_count=int(val), scroll_times=[])  # exact-times off
         elif key == "bitrate":
             set_user(uid, bitrate=int(val), size_target_gb=0.0)
         elif key == "size_target_gb":
@@ -396,6 +430,7 @@ async def _do_render(cq: CallbackQuery, uid: int, job: dict):
                 logos=logos, cover_png=_asset(settings.cover_png),
                 scroll_text=c["scroll_text"], scroll_seconds=c["scroll_seconds"],
                 scroll_count=(c["scroll_count"] or max(1, int(dur / max(2.0, c["scroll_seconds"])))),
+                scroll_times=[mn * 60 for mn in c.get("scroll_times", []) if mn * 60 < dur],
                 width=(job["w"] if c["width"] == 0 else c["width"]),
                 height=(job["h"] if c["height"] == 0 else c["height"]),
                 fps=c["fps"], video_bitrate_k=vk, audio_bitrate_k=c["audio_k"],
