@@ -38,6 +38,8 @@ class Logo:
     path: str
     corner: str = "TR"      # TL | TR | BL | BR
     frac: float = 0.13      # width as fraction of output width
+    margin_x: float = 0.015  # gap from the corner, fraction of width
+    margin_y: float = 0.015  # gap from the corner, fraction of height
 
 
 @dataclass
@@ -100,13 +102,13 @@ def _esc_text(t: str) -> str:
              .replace("%", "\\%"))
 
 
-def _corner_xy(corner: str, margin: int) -> str:
+def _corner_xy(corner: str, mx: int, my: int) -> str:
     return {
-        "TL": f"{margin}:{margin}",
-        "TR": f"W-w-{margin}:{margin}",
-        "BL": f"{margin}:H-h-{margin}",
-        "BR": f"W-w-{margin}:H-h-{margin}",
-    }.get(corner, f"W-w-{margin}:{margin}")
+        "TL": f"{mx}:{my}",
+        "TR": f"W-w-{mx}:{my}",
+        "BL": f"{mx}:H-h-{my}",
+        "BR": f"W-w-{mx}:H-h-{my}",
+    }.get(corner, f"W-w-{mx}:{my}")
 
 
 # ----------------------------------------------------------------- filter
@@ -135,13 +137,16 @@ def build_filter(src_w: int, src_h: int, duration: float,
                 f"enable='between(t,{e.start:.2f},{e.end:.2f})'[ov{i}]")
             cur = f"ov{i}"
 
-    # logos — each scaled + placed at its corner. Inputs start at index 2.
+    # logos — each scaled + placed at its corner with its own margins.
     for idx, lg in enumerate(cfg.logos):
         in_i = 2 + idx
         lw = max(40, int(out_w * lg.frac))
-        parts.append(f"[{in_i}:v]scale={lw}:-1[lg{idx}]")
+        mx, my = int(lg.margin_x * out_w), int(lg.margin_y * out_h)
+        # format=rgba BEFORE scale keeps the alpha channel (else transparent
+        # areas render as a black box).
+        parts.append(f"[{in_i}:v]format=rgba,scale={lw}:-1[lg{idx}]")
         nxt = f"wl{idx}"
-        parts.append(f"[{cur}][lg{idx}]overlay={_corner_xy(lg.corner, margin)}[{nxt}]")
+        parts.append(f"[{cur}][lg{idx}]overlay={_corner_xy(lg.corner, mx, my)}:format=auto[{nxt}]")
         cur = nxt
 
     # scrolling caption — N appearances spread across the video, each taking

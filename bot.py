@@ -42,10 +42,12 @@ _render_lock = asyncio.Lock()
 _pending: dict[int, dict] = {}            # uid -> active job (probe + src path)
 
 CORNER_CYCLE = ["TL", "TR", "BR", "BL"]
-FRAC_CYCLE = [0.08, 0.10, 0.13, 0.16, 0.20]
+SCALE_CYCLE = [0.8, 0.9, 1.0, 1.1, 1.25]
 
+# Defaults measured off John's "Ustaad trailer" output (exact layout):
+#   StreamNxt -> top-LEFT, Bidhaan TV -> top-RIGHT, uppercase caption centered.
 DEFAULTS = {
-    "scroll_text": settings.scroll_text,
+    "scroll_text": "UGAAR AH BIDHAAN TV 0619624090",
     "scroll_seconds": 25.0,
     "scroll_count": 8,           # 0 = continuous (every pass)
     "cover_mode": "auto",        # auto | off
@@ -53,9 +55,11 @@ DEFAULTS = {
     "bitrate": 2000,             # kbps (video)
     "size_target_gb": 0.0,       # >0 -> auto bitrate to hit this size
     "audio_k": 128,
-    "streamnxt_on": True, "streamnxt_corner": "TR",
-    "bidhaan_on": True, "bidhaan_corner": "TL",
-    "logo_frac": 0.13,
+    "streamnxt_on": True, "streamnxt_corner": "TL",
+    "streamnxt_frac": 0.195, "streamnxt_mx": 0.032, "streamnxt_my": 0.095,
+    "bidhaan_on": True, "bidhaan_corner": "TR",
+    "bidhaan_frac": 0.134, "bidhaan_mx": 0.012, "bidhaan_my": 0.091,
+    "logo_scale": 1.0,           # global multiplier on both logo sizes
 }
 
 
@@ -134,7 +138,7 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
         f"📝 Caption: `{c['scroll_text']}`\n"
         f"⏱ Scroll: {c['scroll_seconds']:g}s  •  🔁 {times}\n"
         f"🖼 {res}  •  🎞 {c['fps']}fps  •  📐 {br_label}\n"
-        f"🏷 Logos: {', '.join(logos) or 'none'} ({int(c['logo_frac']*100)}%)\n"
+        f"🏷 Logos: {', '.join(logos) or 'none'} (size {int(c['logo_scale']*100)}%)\n"
         f"🟥 Cover ads: {c['cover_mode']}\n\n"
         f"💾 **Estimated size: {human_size(size)}**{warn}"
     )
@@ -193,7 +197,7 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
         rows = [
             [IKB(f"↻ {sn}", "lg:streamnxt:corner"), IKB("⏻", "lg:streamnxt:toggle")],
             [IKB(f"↻ {bd}", "lg:bidhaan:corner"), IKB("⏻", "lg:bidhaan:toggle")],
-            [IKB(f"Size: {int(c['logo_frac']*100)}%  (tap to change)", "lg:frac:cycle")],
+            [IKB(f"Size: {int(c['logo_scale']*100)}%  (tap to change)", "lg:scale:cycle")],
             _back_row(),
         ]
         return IKM(rows)
@@ -330,10 +334,9 @@ async def _cb(_, cq: CallbackQuery):
         elif act == "corner":
             nxt = CORNER_CYCLE[(CORNER_CYCLE.index(c[f"{who}_corner"]) + 1) % 4]
             set_user(uid, **{f"{who}_corner": nxt})
-        elif act == "cycle" and who == "frac":
-            nxt = FRAC_CYCLE[(FRAC_CYCLE.index(c["logo_frac"]) + 1) % len(FRAC_CYCLE)
-                             if c["logo_frac"] in FRAC_CYCLE else 2]
-            set_user(uid, logo_frac=nxt)
+        elif act == "cycle" and who == "scale":
+            i = SCALE_CYCLE.index(c["logo_scale"]) if c["logo_scale"] in SCALE_CYCLE else 2
+            set_user(uid, logo_scale=SCALE_CYCLE[(i + 1) % len(SCALE_CYCLE)])
         await cq.message.edit_reply_markup(submenu("logos", uid, job))
         return await cq.answer("✓")
 
@@ -370,10 +373,13 @@ async def _do_render(cq: CallbackQuery, uid: int, job: dict):
 
             vk, _ = _effective_bitrate(c, dur)
             logos = []
+            sc = c["logo_scale"]
             if c["streamnxt_on"]:
-                logos.append(Logo(_asset(settings.logo_tr), c["streamnxt_corner"], c["logo_frac"]))
+                logos.append(Logo(_asset(settings.logo_tr), c["streamnxt_corner"],
+                                  c["streamnxt_frac"] * sc, c["streamnxt_mx"], c["streamnxt_my"]))
             if c["bidhaan_on"]:
-                logos.append(Logo(_asset(settings.logo_tl), c["bidhaan_corner"], c["logo_frac"]))
+                logos.append(Logo(_asset(settings.logo_tl), c["bidhaan_corner"],
+                                  c["bidhaan_frac"] * sc, c["bidhaan_mx"], c["bidhaan_my"]))
 
             cfg = RenderConfig(
                 logos=logos, cover_png=_asset(settings.cover_png),
