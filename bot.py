@@ -54,6 +54,7 @@ DEFAULTS = {
     "scroll_seconds": 25.0,
     "scroll_count": 8,           # 0 = continuous (every pass)
     "scroll_times": [],          # exact minute marks (overrides count when set)
+    "brand_start_min": 0.0,      # logos/caption/cover start after this minute (skip intro)
     "cover_mode": "auto",        # auto | off
     "width": 1920, "height": 1080, "fps": 25,
     "bitrate": 2000,             # kbps (video)
@@ -153,7 +154,9 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
         f"⏱ Scroll: {c['scroll_seconds']:g}s  •  🔁 {times}\n"
         f"🖼 {res}  •  🎞 {c['fps']}fps  •  📐 {br_label}\n"
         f"🏷 Logos: {', '.join(logos) or 'none'} (size {int(c['logo_scale']*100)}%)\n"
-        f"🟥 Cover ads: {c['cover_mode']}\n\n"
+        f"🟥 Cover ads: {c['cover_mode']}"
+        + (f"  •  ▶️ starts at {c['brand_start_min']:g}min" if c.get('brand_start_min') else "")
+        + "\n\n"
         f"💾 **Estimated size: {human_size(size)}**{warn}"
     )
     kb = IKM([
@@ -239,6 +242,7 @@ HELP = (
     "/text `caption` — set the scrolling caption\n"
     "/at `1 3 12 24` — show the caption at exact minute marks "
     "(send `/at` alone to clear)\n"
+    "/begin `2` — start logo/caption/cover at minute 2 (skip an intro)\n"
 )
 
 
@@ -271,6 +275,25 @@ async def _text(_, m: Message):
     new = m.text.split(None, 1)[1].strip()
     set_user(m.from_user.id, scroll_text=new)
     await m.reply(f"✅ Caption set:\n`{new}`")
+
+
+@app.on_message(filters.command("begin") & filters.private)
+async def _begin(_, m: Message):
+    if not _allowed(m.from_user.id):
+        return
+    if len(m.command) < 2:
+        return await m.reply("Usage: `/begin 2`  → logo, caption and banner-cover "
+                             "start at minute 2 (skips a 2-min intro). `/begin 0` = from start.")
+    try:
+        mins = float(m.command[1].replace(",", "."))
+    except ValueError:
+        return await m.reply("Give a number of minutes, e.g. `/begin 2`")
+    set_user(m.from_user.id, brand_start_min=max(0.0, mins))
+    if mins <= 0:
+        await m.reply("✅ Branding starts from the very beginning.")
+    else:
+        await m.reply(f"✅ Logo, caption & banner-cover will start at **{mins:g} min** "
+                      f"(the first {mins:g} min / intro stays clean).")
 
 
 @app.on_message(filters.command("at") & filters.private)
@@ -440,6 +463,7 @@ async def _do_render(cq: CallbackQuery, uid: int, job: dict):
                 scroll_text=c["scroll_text"], scroll_seconds=c["scroll_seconds"],
                 scroll_count=(c["scroll_count"] or max(1, int(dur / max(2.0, c["scroll_seconds"])))),
                 scroll_times=[mn * 60 for mn in c.get("scroll_times", []) if mn * 60 < dur],
+                brand_start=c.get("brand_start_min", 0.0) * 60,
                 width=(job["w"] if c["width"] == 0 else c["width"]),
                 height=(job["h"] if c["height"] == 0 else c["height"]),
                 fps=c["fps"], video_bitrate_k=vk, audio_bitrate_k=c["audio_k"],

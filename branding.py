@@ -51,6 +51,8 @@ class RenderConfig:
     scroll_count: int = 8          # how many times it appears (even spread)
     scroll_times: list[float] = field(default_factory=list)  # exact start secs;
     #                              if set, overrides scroll_count
+    brand_start: float = 0.0       # seconds; logos/caption start only after this
+    #                              (skip an intro). Cover bars are gated too.
 
     # output / encode (Wondershare-style)
     width: int = 1920
@@ -120,6 +122,7 @@ def build_filter(src_w: int, src_h: int, duration: float,
     out_h = cfg.height or src_h
     margin = max(8, int(out_w * 0.015))
     fontsize = max(18, int(out_h * 0.030))
+    S = max(0.0, cfg.brand_start)   # branding starts after this (skip intro)
 
     # skip the scale entirely when output == source (saves a full rescale pass)
     if out_w == src_w and out_h == src_h:
@@ -152,7 +155,8 @@ def build_filter(src_w: int, src_h: int, duration: float,
         # areas render as a black box).
         parts.append(f"[{in_i}:v]format=rgba,scale={lw}:-1[lg{idx}]")
         nxt = f"wl{idx}"
-        parts.append(f"[{cur}][lg{idx}]overlay={_corner_xy(lg.corner, mx, my)}:format=auto[{nxt}]")
+        parts.append(f"[{cur}][lg{idx}]overlay={_corner_xy(lg.corner, mx, my)}"
+                     f":format=auto:enable='gte(t,{S:.2f})'[{nxt}]")
         cur = nxt
 
     # scrolling caption (bottom -> up over scroll_seconds).
@@ -171,13 +175,14 @@ def build_filter(src_w: int, src_h: int, duration: float,
                 f"enable='between(t,{start:.2f},{start + T:.2f})'[{lbl}]")
             cur = lbl
     else:
-        # N appearances evenly spread across the video.
+        # N appearances evenly spread across the video AFTER the intro (S).
         n = max(1, cfg.scroll_count)
-        period = max(T, duration / n) if duration > 0 else T
+        span = max(T, (duration - S)) if duration > 0 else T
+        period = max(T, span / n)
         parts.append(
             f"[{cur}]{base}:"
-            f"y='h-(mod(t,{period:.3f})/{T:.3f})*(h+text_h)':"
-            f"enable='lt(mod(t,{period:.3f}),{T:.3f})'[outv]")
+            f"y='h-(mod(t-{S:.2f},{period:.3f})/{T:.3f})*(h+text_h)':"
+            f"enable='gte(t,{S:.2f})*lt(mod(t-{S:.2f},{period:.3f}),{T:.3f})'[outv]")
     return ";".join(parts)
 
 
@@ -186,6 +191,16 @@ def render(video: str, out_path: str, events: list[CoverEvent],
            cfg: RenderConfig,
            progress_cb: Callable[[float], None] | None = None) -> str:
     src_w, src_h, dur = probe(video)
+    # gate cover bars by the branding start (skip the intro): drop banners that
+    # end before it, clip the start of any that straddle it.
+    if cfg.brand_start > 0:
+        gated = []
+        for e in events:
+            if e.end <= cfg.brand_start:
+                continue
+            gated.append(CoverEvent(max(e.start, cfg.brand_start), e.end,
+                                    e.x, e.y, e.w, e.h, e.digits))
+        events = gated
     fc = build_filter(src_w, src_h, dur, events, cfg)
     log.info("render: %dx%d %.0fs -> %dx%d @%dfps, %dk, %d covers",
              src_w, src_h, dur, cfg.width, cfg.height, cfg.fps,
