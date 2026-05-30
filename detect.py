@@ -38,6 +38,7 @@ class CoverEvent:
     y: float       # normalised 0..1 (top)
     w: float       # normalised 0..1 width
     h: float       # normalised 0..1 height
+    digits: int = 0  # how many keyframes confirmed a phone number in this band
 
     def padded(self, px: float = 0.022, py: float = 0.02) -> "CoverEvent":
         """Grow the box a touch so the bar fully hides the banner edges."""
@@ -45,7 +46,7 @@ class CoverEvent:
         y = max(0.0, self.y - py)
         w = min(1.0 - x, self.w + 2 * px)
         h = min(1.0 - y, self.h + 2 * py)
-        return CoverEvent(self.start, self.end, x, y, w, h)
+        return CoverEvent(self.start, self.end, x, y, w, h, self.digits)
 
 
 def _keyframe_times(video: str) -> list[float]:
@@ -114,10 +115,19 @@ def _find_red_banners(img: np.ndarray) -> list[tuple[float, float, float, float]
     return boxes
 
 
-def _find_number_banners(img: np.ndarray) -> list[tuple[float, float, float, float]]:
-    """OCR the lower half for phone-number-like digit runs (catches ad numbers
-    even when the banner isn't strongly red). Returns normalised boxes covering
-    the number, widened a little so the whole number is hidden."""
+def _max_digit_run(s: str) -> int:
+    best = run = 0
+    for ch in s:
+        run = run + 1 if ch.isdigit() else 0
+        best = max(best, run)
+    return best
+
+
+def _find_phone_boxes(img: np.ndarray) -> list[tuple[float, float, float, float]]:
+    """OCR the lower half for REAL phone numbers (>=6 consecutive digits, e.g.
+    0612001600). Strict on purpose — random OCR noise rarely yields a clean
+    6-digit run, so this confirms 'there is a number here' without firing on
+    promos/textures. Returns normalised boxes around the number."""
     if not _HAS_OCR:
         return []
     H, W = img.shape[:2]
@@ -131,15 +141,13 @@ def _find_number_banners(img: np.ndarray) -> list[tuple[float, float, float, flo
     except Exception:
         return []
     for i, txt in enumerate(data["text"]):
-        digits = sum(c.isdigit() for c in txt)
-        if digits >= 4:                      # phone-number-ish
+        if _max_digit_run(txt) >= 6:
             x, y = data["left"][i], data["top"][i]
             w, h = data["width"][i], data["height"][i]
-            # widen horizontally (numbers sit inside a wider bar)
             nx = max(0.0, (x - w * 0.4) / W)
-            ny = max(0.0, (y + y0 - h * 0.4) / H)
+            ny = max(0.0, (y + y0 - h * 0.5) / H)
             nw = min(1.0 - nx, (w * 1.8) / W)
-            nh = min(1.0 - ny, (h * 1.8) / H)
+            nh = min(1.0 - ny, (h * 2.0) / H)
             boxes.append((nx, ny, nw, nh))
     return boxes
 
@@ -212,13 +220,24 @@ def detect_ad_banners(
         img = cv2.imread(fp)
         if img is None:
             continue
-        for box in _find_red_banners(img):
-            has_dig = _has_digits(img, box) if use_ocr else True
-            dets.append((t, box, has_dig))
-        # OCR phone-number banners (non-red ad numbers) — always digit-backed
-        if use_ocr:
-            for box in _find_number_banners(img):
-                dets.append((t, box, True))
+        red_boxes = _find_red_banners(img)
+        phone_boxes = _find_phone_boxes(img) if use_ocr else []
+
+        def _phone_here(b):
+            for pb in phone_boxes:
+                same_row = b[1] <= pb[1] + pb[3] * 0.5 <= b[1] + b[3]
+                if _iou(b, pb) > 0.01 or same_row:
+                    return True
+            return False
+
+        # Red bars give the reliable SPAN+LOCATION; mark each with whether a real
+        # phone number sits in it this frame (confirmation signal).
+        for rb in red_boxes:
+            dets.append((t, rb, _phone_here(rb)))
+        # phone numbers NOT inside any red bar (non-red number banner) -> cover too
+        for pb in phone_boxes:
+            if not any(_iou(pb, rb) > 0.01 for rb in red_boxes):
+                dets.append((t, pb, True))
 
     # cleanup frames to save disk
     for fp in files:
@@ -264,13 +283,11 @@ def detect_ad_banners(
             continue
         if coverage < min_coverage:
             continue
-        if _HAS_OCR and tr["digits"] == 0 and (tr["box"][2] * tr["box"][3]) < 0.05:
-            continue
         x, y, w, h = tr["box"]
         events.append(CoverEvent(
             start=max(0.0, tr["start"] - step / 2),
             end=tr["end"] + step,
-            x=x, y=y, w=w, h=h,
+            x=x, y=y, w=w, h=h, digits=tr["digits"],
         ).padded())
 
     # --- Post-merge by horizontal band ---------------------------------
@@ -297,9 +314,16 @@ def detect_ad_banners(
             ny2 = max(hit.y + hit.h, e.y + e.h)
             hit.x, hit.y, hit.w, hit.h = nx, ny, nx2 - nx, ny2 - ny
             hit.start, hit.end = min(hit.start, e.start), max(hit.end, e.end)
+            hit.digits += e.digits
         else:
-            bands.append(CoverEvent(e.start, e.end, e.x, e.y, e.w, e.h))
+            bands.append(CoverEvent(e.start, e.end, e.x, e.y, e.w, e.h, e.digits))
 
+    # Keep only bands where a real phone number was confirmed somewhere — covers
+    # the WHOLE red bar at that spot even where OCR missed the digits, while
+    # dropping red scene colour that never had a number.
+    if _HAS_OCR:
+        kept = [b for b in bands if b.digits > 0]
+        bands = kept if kept else bands  # if OCR found nothing, fall back to all
     bands.sort(key=lambda e: e.start)
     log.info("detect: %d cover bands (from %d raw)", len(bands), len(events))
     return bands
