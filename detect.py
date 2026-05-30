@@ -405,16 +405,62 @@ def detect_ad_banners(
         kept = [b for b in bands if b["digits"] > 0]
         bands = kept if kept else bands
 
+    # --- Refine each band's start/end so the cover matches the banner exactly --
+    # The coarse interval scan only knows the banner is present at sampled times;
+    # fine-scan (0.4s) around the edges to find the true appear/disappear moment.
+    refdir = os.path.join(work_dir, "ref")
+    os.makedirs(refdir, exist_ok=True)
+
+    def _present_at(t: float, box) -> bool:
+        tmp = os.path.join(refdir, "r.jpg")
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-ss", f"{max(0.0, t):.2f}", "-i", video, "-frames:v", "1",
+                        "-vf", "scale=640:-1", tmp], check=False)
+        img = cv2.imread(tmp)
+        if img is None:
+            return False
+        cand = list(_find_red_banners(img))
+        cand += _find_template_banners(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+        if use_ocr:
+            cand += _find_phone_boxes(img)
+        for c in cand:
+            vov = max(0.0, min(c[1] + c[3], box[1] + box[3]) - max(c[1], box[1]))
+            hov = max(0.0, min(c[0] + c[2], box[0] + box[2]) - max(c[0], box[0]))
+            if vov > 0 and hov > 0.15 * box[2]:
+                return True
+        return False
+
     out: list[CoverEvent] = []
     for b in bands:
         x, y, w, h = b["rep"]
-        # Cover from the moment it arrives: extend the start back a little, and
-        # snap to 0 if the banner shows up in the first few seconds (keyframe
-        # sampling can miss the very start).
-        start = max(0.0, b["start"] - 1.5 * spacing)
-        if start < 6.0:
-            start = 0.0
-        out.append(CoverEvent(start, b["end"], x, y, w, h, b["digits"]).padded())
+        box = (x, y, w, h)
+        # true start: first present moment scanning forward from before s0
+        rs = b["start"]
+        t = max(0.0, b["start"] - spacing)
+        while t <= b["start"] + spacing:
+            if _present_at(t, box):
+                rs = max(0.0, t - 0.25)
+                break
+            t += 0.4
+        # true end: last present moment scanning backward from after e0
+        re = b["end"]
+        t = b["end"] + spacing
+        while t >= b["end"] - spacing:
+            if _present_at(t, box):
+                re = t + 0.25
+                break
+            t -= 0.4
+        if rs < 0.8:
+            rs = 0.0
+        if re <= rs:
+            re = rs + 1.0
+        out.append(CoverEvent(rs, re, x, y, w, h, b["digits"]).padded())
+
+    for f in glob.glob(os.path.join(refdir, "*.jpg")):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
     out.sort(key=lambda e: e.start)
-    log.info("detect: %d cover bands", len(out))
+    log.info("detect: %d cover bands (edges refined)", len(out))
     return out
