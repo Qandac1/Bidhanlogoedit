@@ -43,6 +43,9 @@ _pending: dict[int, dict] = {}            # uid -> active job (probe + src path)
 
 CORNER_CYCLE = ["TL", "TR", "BR", "BL"]
 SCALE_CYCLE = [0.8, 0.9, 1.0, 1.1, 1.25]
+# horizontal offset presets for the left Bidhaan, to clear whatever logo the
+# source already has top-left (far-left / after small logo / after wide logo)
+MX_CYCLE = [0.012, 0.12, 0.22, 0.32]
 
 # Defaults measured off John's "Ustaad trailer" output (exact layout):
 #   StreamNxt -> top-LEFT, Bidhaan TV -> top-RIGHT, uppercase caption centered.
@@ -210,6 +213,7 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
             [IKB(f"↻ {sn}", "lg:streamnxt:corner"), IKB("⏻", "lg:streamnxt:toggle")],
             [IKB(f"↻ {bd}", "lg:bidhaan:corner"), IKB("⏻", "lg:bidhaan:toggle")],
             [IKB(f"↻ {b2}", "lg:bidhaan2:corner"), IKB("⏻", "lg:bidhaan2:toggle")],
+            [IKB(f"Bidhaan-L slide →  {int(c['bidhaan2_mx']*100)}%", "lg:bidhaan2:offset")],
             [IKB(f"Size: {int(c['logo_scale']*100)}%  (tap to change)", "lg:scale:cycle")],
             _back_row(),
         ]
@@ -379,6 +383,10 @@ async def _cb(_, cq: CallbackQuery):
         elif act == "cycle" and who == "scale":
             i = SCALE_CYCLE.index(c["logo_scale"]) if c["logo_scale"] in SCALE_CYCLE else 2
             set_user(uid, logo_scale=SCALE_CYCLE[(i + 1) % len(SCALE_CYCLE)])
+        elif act == "offset" and who == "bidhaan2":
+            cur = min(MX_CYCLE, key=lambda v: abs(v - c["bidhaan2_mx"]))
+            i = MX_CYCLE.index(cur)
+            set_user(uid, bidhaan2_mx=MX_CYCLE[(i + 1) % len(MX_CYCLE)])
         await cq.message.edit_reply_markup(submenu("logos", uid, job))
         return await cq.answer("✓")
 

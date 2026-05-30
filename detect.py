@@ -40,7 +40,7 @@ class CoverEvent:
     h: float       # normalised 0..1 height
     digits: int = 0  # how many keyframes confirmed a phone number in this band
 
-    def padded(self, px: float = 0.022, py: float = 0.02) -> "CoverEvent":
+    def padded(self, px: float = 0.012, py: float = 0.01) -> "CoverEvent":
         """Grow the box a touch so the bar fully hides the banner edges."""
         x = max(0.0, self.x - px)
         y = max(0.0, self.y - py)
@@ -250,80 +250,81 @@ def detect_ad_banners(
         log.info("detect: no ad banners found")
         return []
 
-    # cluster into tracks by spatial overlap + temporal continuity
+    # cluster into tracks by spatial overlap + temporal continuity; keep ALL
+    # member boxes so we can size the cover tightly later (not by union).
     tracks: list[dict] = []
     for t, box, has_dig in dets:
         placed = False
         for tr in tracks:
-            if t - tr["last_t"] <= merge_gap and _iou(tr["box"], box) >= 0.4:
+            if t - tr["last_t"] <= merge_gap and _iou(tr["rep"], box) >= 0.4:
                 tr["end"] = t
                 tr["last_t"] = t
                 tr["hits"] += 1
                 tr["digits"] += int(has_dig)
-                bx = min(tr["box"][0], box[0])
-                by = min(tr["box"][1], box[1])
-                bw = max(tr["box"][0] + tr["box"][2], box[0] + box[2]) - bx
-                bh = max(tr["box"][1] + tr["box"][3], box[1] + box[3]) - by
-                tr["box"] = (bx, by, bw, bh)
+                tr["boxes"].append(box)
+                tr["rep"] = box
                 placed = True
                 break
         if not placed:
-            tracks.append({"start": t, "end": t, "last_t": t, "box": box,
-                           "hits": 1, "digits": int(has_dig)})
+            tracks.append({"start": t, "end": t, "last_t": t, "rep": box,
+                           "boxes": [box], "hits": 1, "digits": int(has_dig)})
 
-    events: list[CoverEvent] = []
+    LINK_GAP = 60.0
+
+    def _box_from(boxes: list) -> tuple[float, float, float, float]:
+        """Tight cover box: UNION horizontally (covers the slide), MEDIAN
+        vertically (the banner's row is constant — ignores high outliers), and
+        snap the bottom to the frame edge if the bar sits at the bottom."""
+        import statistics as st
+        x = min(b[0] for b in boxes)
+        x2 = max(b[0] + b[2] for b in boxes)
+        y = st.median([b[1] for b in boxes])
+        y2 = st.median([b[1] + b[3] for b in boxes])
+        if y2 >= 0.86:
+            y2 = 1.0
+        return (x, y, x2 - x, y2 - y)
+
+    # tracks -> events (filtered), carrying member boxes
     step = spacing
+    raw: list[dict] = []
     for tr in tracks:
         dur = tr["end"] - tr["start"] + step
         span_frames = max(1, round((tr["end"] - tr["start"]) / spacing) + 1)
-        coverage = tr["hits"] / span_frames
-        # A real banner: lasts a while, is present in most frames of its span,
-        # and (if OCR available) shows digits at least once.
-        if dur < min_duration:
+        if dur < min_duration or tr["hits"] / span_frames < min_coverage:
             continue
-        if coverage < min_coverage:
-            continue
-        x, y, w, h = tr["box"]
-        events.append(CoverEvent(
-            start=max(0.0, tr["start"] - step / 2),
-            end=tr["end"] + step,
-            x=x, y=y, w=w, h=h, digits=tr["digits"],
-        ).padded())
+        raw.append({"start": max(0.0, tr["start"] - step / 2),
+                    "end": tr["end"] + step, "digits": tr["digits"],
+                    "boxes": tr["boxes"], "rep": _box_from(tr["boxes"])})
 
-    # --- Post-merge by horizontal band ---------------------------------
-    # These broadcaster banners SLIDE in/out, so a single banner fragments into
-    # several boxes at different x. Merge everything sharing a vertical band into
-    # ONE continuous cover with the UNION box, spanning first->last appearance.
-    # This is how John covers manually (one bar over the whole active segment)
-    # and guarantees a sliding phone number can't leak between samples.
-    LINK_GAP = 60.0
+    # --- Post-merge by horizontal band (continuous cover over active span) ---
+    def _voverlap(a, b) -> bool:
+        top, bot = max(a[1], b[1]), min(a[1] + a[3], b[1] + b[3])
+        return max(0.0, bot - top) / max(1e-6, min(a[3], b[3])) > 0.4
 
-    def _voverlap(a: CoverEvent, b: CoverEvent) -> bool:
-        top, bot = max(a.y, b.y), min(a.y + a.h, b.y + b.h)
-        inter = max(0.0, bot - top)
-        return inter / max(1e-6, min(a.h, b.h)) > 0.5
-
-    events.sort(key=lambda e: e.start)
-    bands: list[CoverEvent] = []
-    for e in events:
+    raw.sort(key=lambda e: e["start"])
+    bands: list[dict] = []
+    for e in raw:
         hit = next((b for b in bands
-                    if _voverlap(e, b) and e.start <= b.end + LINK_GAP), None)
+                    if _voverlap(e["rep"], b["rep"]) and e["start"] <= b["end"] + LINK_GAP),
+                   None)
         if hit:
-            nx, ny = min(hit.x, e.x), min(hit.y, e.y)
-            nx2 = max(hit.x + hit.w, e.x + e.w)
-            ny2 = max(hit.y + hit.h, e.y + e.h)
-            hit.x, hit.y, hit.w, hit.h = nx, ny, nx2 - nx, ny2 - ny
-            hit.start, hit.end = min(hit.start, e.start), max(hit.end, e.end)
-            hit.digits += e.digits
+            hit["boxes"] += e["boxes"]
+            hit["start"] = min(hit["start"], e["start"])
+            hit["end"] = max(hit["end"], e["end"])
+            hit["digits"] += e["digits"]
+            hit["rep"] = _box_from(hit["boxes"])
         else:
-            bands.append(CoverEvent(e.start, e.end, e.x, e.y, e.w, e.h, e.digits))
+            bands.append(dict(e))
 
-    # Keep only bands where a real phone number was confirmed somewhere — covers
-    # the WHOLE red bar at that spot even where OCR missed the digits, while
-    # dropping red scene colour that never had a number.
+    # keep only bands with a confirmed phone number (drops red scene colour)
     if _HAS_OCR:
-        kept = [b for b in bands if b.digits > 0]
-        bands = kept if kept else bands  # if OCR found nothing, fall back to all
-    bands.sort(key=lambda e: e.start)
-    log.info("detect: %d cover bands (from %d raw)", len(bands), len(events))
-    return bands
+        kept = [b for b in bands if b["digits"] > 0]
+        bands = kept if kept else bands
+
+    out: list[CoverEvent] = []
+    for b in bands:
+        x, y, w, h = b["rep"]
+        out.append(CoverEvent(b["start"], b["end"], x, y, w, h, b["digits"]).padded())
+    out.sort(key=lambda e: e.start)
+    log.info("detect: %d cover bands", len(out))
+    return out
