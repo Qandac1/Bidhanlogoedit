@@ -68,6 +68,28 @@ def _keyframe_times(video: str) -> list[float]:
     return sorted(ts)
 
 
+def _duration(video: str) -> float:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", video], capture_output=True, text=True).stdout.strip()
+    try:
+        return float(out)
+    except ValueError:
+        return 0.0
+
+
+def _extract_frames(video: str, out_dir: str, fps: float, width: int = 640) -> int:
+    """Sample frames at a fixed rate (decode pass) -> scaled JPEGs."""
+    os.makedirs(out_dir, exist_ok=True)
+    for f in glob.glob(os.path.join(out_dir, "*.jpg")):
+        os.remove(f)
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", video,
+         "-vf", f"fps={fps},scale={width}:-1", "-q:v", "3",
+         os.path.join(out_dir, "f_%06d.jpg")], check=True)
+    return len(glob.glob(os.path.join(out_dir, "*.jpg")))
+
+
 def _extract_keyframes(video: str, out_dir: str, width: int = 640) -> int:
     """Decode ONLY keyframes (decode-light) -> scaled JPEGs. Returns count."""
     os.makedirs(out_dir, exist_ok=True)
@@ -154,6 +176,54 @@ def _find_phone_boxes(img: np.ndarray) -> list[tuple[float, float, float, float]
     return boxes
 
 
+_TEMPLATES = None
+
+
+def _load_templates():
+    """Load banner templates (cropped from full-res 1920-wide frames) once."""
+    global _TEMPLATES
+    if _TEMPLATES is not None:
+        return _TEMPLATES
+    _TEMPLATES = []
+    for base in (os.path.join(os.path.dirname(__file__), "assets", "templates"),
+                 "/app/assets/templates"):
+        if os.path.isdir(base):
+            for f in sorted(glob.glob(os.path.join(base, "*.png"))):
+                t = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
+                if t is not None and t.size:
+                    _TEMPLATES.append((os.path.basename(f), t))
+            break
+    if _TEMPLATES:
+        log.info("detect: %d banner template(s) loaded", len(_TEMPLATES))
+    return _TEMPLATES
+
+
+def _find_template_banners(gray: np.ndarray) -> list[tuple[float, float, float, float]]:
+    """Match known recurring banners (e.g. Fanproj CHANNELS strip) by their exact
+    look — reliable, catches them everywhere with no false positives. Templates
+    were cropped from 1920-wide frames, so scale to this frame's width."""
+    out = []
+    H, W = gray.shape[:2]
+    base = W / 1920.0
+    for _name, tmpl in _load_templates():
+        best = None
+        for s in (0.85, 1.0, 1.15):
+            tw, th = int(tmpl.shape[1] * base * s), int(tmpl.shape[0] * base * s)
+            if tw < 12 or th < 12 or tw >= W or th >= H:
+                continue
+            res = cv2.matchTemplate(gray, cv2.resize(tmpl, (tw, th)),
+                                    cv2.TM_CCOEFF_NORMED)
+            _mn, mv, _ml, ml = cv2.minMaxLoc(res)
+            if best is None or mv > best[0]:
+                best = (mv, ml, tw, th)
+        if best and best[0] >= 0.60:
+            _, (lx, ly), tw, th = best
+            nx, ny, nw, nh = lx / W, ly / H, tw / W, th / H
+            nw = min(1.0 - nx, nw * 1.5)   # extend to full banner (logo+icons+box)
+            out.append((nx, ny, nw, nh))
+    return out
+
+
 def _has_digits(img: np.ndarray, box: tuple[float, float, float, float]) -> bool:
     """OCR a crop; True if it looks like it contains a phone-ish digit run."""
     if not _HAS_OCR:
@@ -199,21 +269,21 @@ def detect_ad_banners(
     but ignored; timing comes from the real keyframe timestamps.
     """
     frames_dir = os.path.join(work_dir, "frames")
-    times = _keyframe_times(video)
-    n = _extract_keyframes(video, frames_dir)
+    dur = _duration(video)
+    # Fixed-interval sampling (~every 2s) so a banner can't hide between
+    # keyframes; capped at ~2200 frames so very long movies stay reasonable.
+    sample_fps = max(0.30, min(0.6, 2200.0 / max(1.0, dur)))
+    n = _extract_frames(video, frames_dir, sample_fps)
     files = sorted(glob.glob(os.path.join(frames_dir, "*.jpg")))
-    m = min(len(files), len(times))
-    files, times = files[:m], times[:m]
+    m = len(files)
     if m < 2:
-        log.info("detect: too few keyframes (%d)", m)
+        log.info("detect: too few frames (%d)", m)
         return []
-    spacing = max(0.5, (times[-1] - times[0]) / max(1, m - 1))
-    # A recurring banner sits in the SAME spot but the sparse keyframe scan can
-    # miss it between hits. Merge same-location detections across a generous gap
-    # so the cover is CONTINUOUS over its active span — over-covering a fixed
-    # bottom strip briefly is fine; leaking a phone number is not.
+    times = [i / sample_fps for i in range(m)]
+    spacing = 1.0 / sample_fps
     merge_gap = max(merge_gap, 4.0 * spacing, 15.0)
-    log.info("detect: %d keyframes, ~%.1fs apart, merge_gap=%.0fs", m, spacing, merge_gap)
+    log.info("detect: %d frames @%.2ffps (~%.1fs apart), merge_gap=%.0fs",
+             m, sample_fps, spacing, merge_gap)
 
     # per-timestamp detections: (t, box, has_phone, is_red). is_red boxes give
     # the TIGHT banner geometry; phone-only boxes are confirmation/fallback.
@@ -225,6 +295,7 @@ def detect_ad_banners(
             continue
         red_boxes = _find_red_banners(img)
         phone_boxes = _find_phone_boxes(img) if use_ocr else []
+        tmpl_boxes = _find_template_banners(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
 
         def _samerow(b, pb):
             return b[1] - 0.05 <= pb[1] + pb[3] * 0.5 <= b[1] + b[3] + 0.05
@@ -246,6 +317,9 @@ def detect_ad_banners(
         for pb in phone_boxes:
             if not any(_iou(pb, rb) > 0.005 or _samerow(rb, pb) for rb in red_boxes):
                 dets.append((t, pb, True, False))
+        # matched known banners (template) — count as confirmed banners
+        for tb in tmpl_boxes:
+            dets.append((t, tb, True, True))
 
     # cleanup frames to save disk
     for fp in files:
