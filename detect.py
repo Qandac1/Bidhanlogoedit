@@ -40,14 +40,16 @@ class CoverEvent:
     h: float       # normalised 0..1 height
     digits: int = 0  # how many keyframes confirmed a phone number in this band
 
-    def padded(self, px: float = 0.03, py: float = 0.012) -> "CoverEvent":
-        """Grow the box just a touch so the bar matches the banner (covers the
-        non-red edge) without over-covering — like a Wondershare bar placed on
-        the number, not a big block."""
+    def padded(self, px: float = 0.03, py_top: float = 0.04,
+               py_bot: float = 0.02) -> "CoverEvent":
+        """Grow the box to fully cover the banner with NO edge showing. The red
+        detection only sees the red bar, but the banner (set-top-box graphic,
+        icons) is taller — so extend more on TOP to reach the banner's real top,
+        plus a little each side; not a big block, just enough to hide all edges."""
         x = max(0.0, self.x - px)
-        y = max(0.0, self.y - py)
+        y = max(0.0, self.y - py_top)
         w = min(1.0 - x, self.w + 2 * px)
-        h = min(1.0 - y, self.h + 2 * py)
+        h = min(1.0 - y, self.h + py_top + py_bot)
         return CoverEvent(self.start, self.end, x, y, w, h, self.digits)
 
 
