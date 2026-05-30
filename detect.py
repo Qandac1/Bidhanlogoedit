@@ -150,19 +150,17 @@ def _max_digit_run(s: str) -> int:
 
 
 def _find_phone_boxes(img: np.ndarray) -> list[tuple[float, float, float, float]]:
-    """OCR the lower half for REAL phone numbers (>=6 consecutive digits, e.g.
-    0612001600). Strict on purpose — random OCR noise rarely yields a clean
-    6-digit run, so this confirms 'there is a number here' without firing on
-    promos/textures. Returns normalised boxes around the number."""
+    """OCR the WHOLE frame for phone numbers (>=6 consecutive digits, e.g.
+    0612001600 / 0619624090). The number is the universal signal of an ad
+    banner — any size, any location. Returns normalised boxes around each
+    number, widened to the banner strip so the whole banner gets covered."""
     if not _HAS_OCR:
         return []
     H, W = img.shape[:2]
-    y0 = int(0.52 * H)
-    region = img[y0:, :]
     boxes: list[tuple[float, float, float, float]] = []
     try:
         from pytesseract import Output
-        data = pytesseract.image_to_data(region, config="--psm 11",
+        data = pytesseract.image_to_data(img, config="--psm 11",
                                          output_type=Output.DICT)
     except Exception:
         return []
@@ -170,10 +168,11 @@ def _find_phone_boxes(img: np.ndarray) -> list[tuple[float, float, float, float]
         if _max_digit_run(txt) >= 6:
             x, y = data["left"][i], data["top"][i]
             w, h = data["width"][i], data["height"][i]
-            nx = max(0.0, (x - w * 0.4) / W)
-            ny = max(0.0, (y + y0 - h * 0.5) / H)
-            nw = min(1.0 - nx, (w * 1.8) / W)
-            nh = min(1.0 - ny, (h * 2.0) / H)
+            # widen to cover the banner strip around the number
+            nx = max(0.0, (x - w * 0.6) / W)
+            ny = max(0.0, (y - h * 0.8) / H)
+            nw = min(1.0 - nx, (w * 2.2) / W)
+            nh = min(1.0 - ny, (h * 2.6) / H)
             boxes.append((nx, ny, nw, nh))
     return boxes
 
@@ -275,7 +274,7 @@ def detect_ad_banners(
     # Fixed-interval sampling (~every 2s) so a banner can't hide between
     # keyframes; capped at ~2200 frames so very long movies stay reasonable.
     sample_fps = max(0.30, min(0.6, 2200.0 / max(1.0, dur)))
-    n = _extract_frames(video, frames_dir, sample_fps)
+    n = _extract_frames(video, frames_dir, sample_fps, width=960)
     files = sorted(glob.glob(os.path.join(frames_dir, "*.jpg")))
     m = len(files)
     if m < 2:
@@ -289,8 +288,14 @@ def detect_ad_banners(
     log.info("detect: %d frames @%.2ffps (~%.1fs apart), merge_gap=%.0fs",
              m, sample_fps, spacing, merge_gap)
 
-    # per-timestamp detections: (t, box, has_phone, is_red). is_red boxes give
-    # the TIGHT banner geometry; phone-only boxes are confirmation/fallback.
+    # per-timestamp detections: (t, box, has_phone, is_red).
+    # NUMBER-CENTRIC: a phone number (>=6 digits) anywhere = an ad banner, any
+    # size/location. Cover it, expanded to any red bar around it. Plus known
+    # banner templates. Red WITHOUT a number is NOT covered (avoids roses/
+    # clothing false positives).
+    def _samerow(b, pb):
+        return b[1] - 0.05 <= pb[1] + pb[3] * 0.5 <= b[1] + b[3] + 0.05
+
     dets: list = []
     for idx, fp in enumerate(files):
         t = times[idx]
@@ -298,18 +303,12 @@ def detect_ad_banners(
         if img is None:
             continue
         red_boxes = _find_red_banners(img)
-        # OCR is the slow step — only run it where there's actually a red bar
-        # (phone banners are red). Massively speeds up long (2h) scans.
-        phone_boxes = _find_phone_boxes(img) if (use_ocr and red_boxes) else []
+        phone_boxes = _find_phone_boxes(img) if use_ocr else []
         tmpl_boxes = _find_template_banners(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
 
-        def _samerow(b, pb):
-            return b[1] - 0.05 <= pb[1] + pb[3] * 0.5 <= b[1] + b[3] + 0.05
-
+        # red bars (reliable for red phone bars); union any number on the same
+        # row for full width; flag whether a number was confirmed this frame
         for rb in red_boxes:
-            # UNION the red bar with any phone-number box on the same row so the
-            # cover spans the FULL number (the red box alone is often narrower
-            # than the digits -> the end of the number was leaking).
             box = rb
             phone = False
             for pb in phone_boxes:
@@ -320,10 +319,10 @@ def detect_ad_banners(
                     box = (ux, uy, ux2 - ux, uy2 - uy)
                     phone = True
             dets.append((t, box, phone, True))
+        # numbers NOT on a red bar = non-red banner (any size/location)
         for pb in phone_boxes:
             if not any(_iou(pb, rb) > 0.005 or _samerow(rb, pb) for rb in red_boxes):
-                dets.append((t, pb, True, False))
-        # matched known banners (template) — count as confirmed banners
+                dets.append((t, pb, True, True))
         for tb in tmpl_boxes:
             dets.append((t, tb, True, True))
 
@@ -406,10 +405,10 @@ def detect_ad_banners(
         else:
             bands.append(dict(e))
 
-    # keep only bands with a confirmed phone number (drops red scene colour)
-    if _HAS_OCR:
-        kept = [b for b in bands if b["digits"] > 0]
-        bands = kept if kept else bands
+    # Keep a band if a number/template confirmed it (digits>0) OR it's a
+    # SUSTAINED bar (>=6s) — a real banner persists in place, while red roses /
+    # clothing / scene colour are transient or fail the bar-shape filters.
+    bands = [b for b in bands if b["digits"] > 0 or (b["end"] - b["start"]) >= 6.0]
 
     # --- Refine each band's start/end so the cover matches the banner exactly --
     # The coarse interval scan only knows the banner is present at sampled times;
