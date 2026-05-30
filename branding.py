@@ -2,12 +2,13 @@
 The render engine. Takes a source video + cover timeline + branding config and
 produces the final branded file in a SINGLE ffmpeg pass:
 
-  * top-right logo   (StreamNxt)
-  * top-left  logo   (Bidhaan TV)
-  * scrolling caption (name + number) moving bottom -> up
+  * logos at chosen corners (StreamNxt / Bidhaan TV)
+  * scrolling caption (name + number) — choose travel-seconds + how many times it
+    appears across the whole video
   * red/black cover bar over every detected ad/number banner (per-interval)
 
-Everything is one filter_complex so the video is decoded/encoded only once.
+Encoding matches the Wondershare export: MP4 / H.264 / 25fps / target bitrate /
+Rec.709, so file size is predictable (and can be auto-targeted to ~2 GB).
 """
 from __future__ import annotations
 
@@ -15,29 +16,50 @@ import os
 import json
 import logging
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from detect import CoverEvent
 
 log = logging.getLogger("branding")
 
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+CORNERS = {
+    "TL": "top-left",
+    "TR": "top-right",
+    "BL": "bottom-left",
+    "BR": "bottom-right",
+}
+
+
+@dataclass
+class Logo:
+    path: str
+    corner: str = "TR"      # TL | TR | BL | BR
+    frac: float = 0.13      # width as fraction of output width
+
 
 @dataclass
 class RenderConfig:
-    logo_tr: str          # absolute path, top-right png
-    logo_tl: str          # absolute path, top-left png
-    cover_png: str        # absolute path, red/black bar png
-    scroll_text: str
-    x264_preset: str = "veryfast"
-    x264_crf: int = 21
-    out_height: int = 0   # 0 = keep source height
-    scroll_speed: int = 70  # px / second
-    logo_frac: float = 0.13  # logo width as fraction of output width
+    logos: list[Logo] = field(default_factory=list)
+    cover_png: str = ""
+    scroll_text: str = ""
+    scroll_seconds: float = 25.0   # time the caption takes to travel bottom->up
+    scroll_count: int = 8          # how many times it appears across the video
+
+    # output / encode (Wondershare-style)
+    width: int = 1920
+    height: int = 1080
+    fps: int = 25
+    video_bitrate_k: int = 2000    # kbps; if 0 -> CRF mode
+    crf: int = 21
+    audio_bitrate_k: int = 128
+    preset: str = "veryfast"
 
 
+# ----------------------------------------------------------------- helpers
 def probe(video: str) -> tuple[int, int, float]:
-    """Return (width, height, duration_seconds)."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-print_format", "json",
          "-show_streams", "-show_format", video],
@@ -50,96 +72,127 @@ def probe(video: str) -> tuple[int, int, float]:
     return w, h, dur
 
 
+def estimate_size_bytes(duration: float, video_bitrate_k: int,
+                        audio_bitrate_k: int = 128) -> int:
+    """Predicted output size, the way Wondershare shows it before export."""
+    total_kbps = video_bitrate_k + audio_bitrate_k
+    return int(total_kbps * 1000 / 8 * duration)
+
+
+def bitrate_for_target(duration: float, target_bytes: int,
+                       audio_bitrate_k: int = 128) -> int:
+    """kbps video bitrate needed to land on `target_bytes`."""
+    total_kbps = target_bytes * 8 / 1000 / max(1.0, duration)
+    return max(200, int(total_kbps - audio_bitrate_k))
+
+
+def human_size(b: int) -> str:
+    gb = b / (1024 ** 3)
+    if gb >= 1:
+        return f"{gb:.2f} GB"
+    return f"{b / (1024 ** 2):.0f} MB"
+
+
 def _esc_text(t: str) -> str:
-    """Escape a string for ffmpeg drawtext."""
     return (t.replace("\\", "\\\\")
              .replace(":", "\\:")
-             .replace("'", "’")   # curly apostrophe — dodges quoting hell
+             .replace("'", "’")
              .replace("%", "\\%"))
 
 
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+def _corner_xy(corner: str, margin: int) -> str:
+    return {
+        "TL": f"{margin}:{margin}",
+        "TR": f"W-w-{margin}:{margin}",
+        "BL": f"{margin}:H-h-{margin}",
+        "BR": f"W-w-{margin}:H-h-{margin}",
+    }.get(corner, f"W-w-{margin}:{margin}")
 
 
-def build_filter(src_w: int, src_h: int, events: list[CoverEvent],
-                 cfg: RenderConfig) -> str:
-    """Construct the filter_complex string. Inputs are assumed to be:
-       [0]=video [1]=logo_tr [2]=logo_tl [3]=cover_png"""
-    if cfg.out_height and cfg.out_height < src_h:
-        out_h = cfg.out_height
-        out_w = int(round(src_w * out_h / src_h / 2) * 2)
-    else:
-        out_w, out_h = src_w, src_h
-
-    logo_w = max(40, int(out_w * cfg.logo_frac))
+# ----------------------------------------------------------------- filter
+def build_filter(src_w: int, src_h: int, duration: float,
+                 events: list[CoverEvent], cfg: RenderConfig) -> str:
+    out_w = cfg.width or src_w
+    out_h = cfg.height or src_h
     margin = max(8, int(out_w * 0.015))
     fontsize = max(18, int(out_h * 0.030))
 
-    parts: list[str] = []
+    parts: list[str] = ["[0:v]scale=%d:%d,setsar=1[base]" % (out_w, out_h)]
 
-    # 0) base scale (forces a known output size; no-op if unchanged)
-    parts.append(f"[0:v]scale={out_w}:{out_h}[base]")
-
-    # 1) cover bars — split the cover png into one stream per event, scale each
-    #    to its box, overlay with a time gate.
+    # cover bars  ([1]=cover png)
     cur = "base"
     if events:
         n = len(events)
         labels = "".join(f"[c{i}]" for i in range(n))
-        parts.append(f"[3:v]split={n}{labels}" if n > 1 else "[3:v]null[c0]")
+        parts.append(f"[1:v]split={n}{labels}" if n > 1 else "[1:v]null[c0]")
         for i, e in enumerate(events):
             bw = max(2, int(e.w * out_w))
             bh = max(2, int(e.h * out_h))
-            bx = int(e.x * out_w)
-            by = int(e.y * out_h)
+            bx, by = int(e.x * out_w), int(e.y * out_h)
             parts.append(f"[c{i}]scale={bw}:{bh}[cs{i}]")
-            nxt = f"ov{i}"
             parts.append(
                 f"[{cur}][cs{i}]overlay={bx}:{by}:"
-                f"enable='between(t,{e.start:.2f},{e.end:.2f})'[{nxt}]"
-            )
-            cur = nxt
+                f"enable='between(t,{e.start:.2f},{e.end:.2f})'[ov{i}]")
+            cur = f"ov{i}"
 
-    # 2) logos: scale then overlay (top-left, top-right)
-    parts.append(f"[1:v]scale={logo_w}:-1[ltr]")
-    parts.append(f"[2:v]scale={logo_w}:-1[ltl]")
-    parts.append(f"[{cur}][ltr]overlay=W-w-{margin}:{margin}[wtr]")
-    parts.append(f"[wtr][ltl]overlay={margin}:{margin}[wtl]")
+    # logos — each scaled + placed at its corner. Inputs start at index 2.
+    for idx, lg in enumerate(cfg.logos):
+        in_i = 2 + idx
+        lw = max(40, int(out_w * lg.frac))
+        parts.append(f"[{in_i}:v]scale={lw}:-1[lg{idx}]")
+        nxt = f"wl{idx}"
+        parts.append(f"[{cur}][lg{idx}]overlay={_corner_xy(lg.corner, margin)}[{nxt}]")
+        cur = nxt
 
-    # 3) scrolling caption bottom -> up (loops continuously)
+    # scrolling caption — N appearances spread across the video, each taking
+    # scroll_seconds to travel bottom -> up.
     txt = _esc_text(cfg.scroll_text)
+    n = max(1, cfg.scroll_count)
+    T = max(2.0, cfg.scroll_seconds)
+    period = max(T, duration / n) if duration > 0 else T
     parts.append(
-        f"[wtl]drawtext=fontfile={FONT}:text='{txt}':"
+        f"[{cur}]drawtext=fontfile={FONT}:text='{txt}':"
         f"fontcolor=white:fontsize={fontsize}:borderw=2:bordercolor=black@0.9:"
         f"x=(w-text_w)/2:"
-        f"y=h-mod(t*{cfg.scroll_speed}\\,h+text_h)[outv]"
-    )
+        f"y='h-(mod(t,{period:.3f})/{T:.3f})*(h+text_h)':"
+        f"enable='lt(mod(t,{period:.3f}),{T:.3f})'[outv]")
     return ";".join(parts)
 
 
+# ----------------------------------------------------------------- render
 def render(video: str, out_path: str, events: list[CoverEvent],
            cfg: RenderConfig,
            progress_cb: Callable[[float], None] | None = None) -> str:
-    """Run the single-pass render. Calls progress_cb(percent 0..100)."""
     src_w, src_h, dur = probe(video)
-    fc = build_filter(src_w, src_h, events, cfg)
-    log.info("render: %dx%d %.0fs, %d cover events", src_w, src_h, dur, len(events))
+    fc = build_filter(src_w, src_h, dur, events, cfg)
+    log.info("render: %dx%d %.0fs -> %dx%d @%dfps, %dk, %d covers",
+             src_w, src_h, dur, cfg.width, cfg.height, cfg.fps,
+             cfg.video_bitrate_k, len(events))
 
-    cmd = [
-        "ffmpeg", "-hide_banner", "-y",
-        "-i", video,
-        "-i", cfg.logo_tr,
-        "-i", cfg.logo_tl,
-        "-i", cfg.cover_png,
-        "-filter_complex", fc,
-        "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", cfg.x264_preset, "-crf", str(cfg.x264_crf),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        "-progress", "pipe:1", "-nostats",
-        out_path,
-    ]
+    # [0]=video  [1]=cover png  [2..]=logos
+    inputs = ["-i", video, "-i", cfg.cover_png]
+    for lg in cfg.logos:
+        inputs += ["-i", lg.path]
+
+    cmd = ["ffmpeg", "-hide_banner", "-y", *inputs,
+           "-filter_complex", fc,
+           "-map", "[outv]", "-map", "0:a?",
+           "-r", str(cfg.fps),
+           "-c:v", "libx264", "-preset", cfg.preset,
+           "-pix_fmt", "yuv420p", "-profile:v", "high",
+           "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+
+    if cfg.video_bitrate_k > 0:
+        vk = cfg.video_bitrate_k
+        cmd += ["-b:v", f"{vk}k", "-maxrate", f"{int(vk*1.5)}k",
+                "-bufsize", f"{vk*2}k"]
+    else:
+        cmd += ["-crf", str(cfg.crf)]
+
+    cmd += ["-c:a", "aac", "-b:a", f"{cfg.audio_bitrate_k}k",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1", "-nostats", out_path]
+
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, bufsize=1)
     last = -5.0

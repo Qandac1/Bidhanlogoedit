@@ -1,11 +1,12 @@
 """
 Bidhaan Logo-Edit bot.
 
-Send it a video; it returns the same video branded exactly like John's Filmora
-workflow — logos burned top-left/top-right, scrolling name+number caption, and
-the broadcaster ad/phone-number banners auto-covered with the red/black bar.
+Send a video -> a control panel appears (inline buttons) where you pick logo
+positions, scroll-caption timing + how many times it shows, output resolution,
+fps and bitrate (with a live file-size estimate, like Wondershare) -> Render.
 
-One render at a time (encodes are heavy); progress is reported live.
+The bot then covers broadcaster ad/number banners, burns the logos + caption,
+and returns the finished file. One render at a time, with live progress.
 """
 from __future__ import annotations
 
@@ -17,25 +18,48 @@ import logging
 
 import uvloop
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB,
+)
 
 from config import settings
-from branding import RenderConfig, render
+from branding import (
+    Logo, RenderConfig, render, probe,
+    estimate_size_bytes, bitrate_for_target, human_size,
+)
 from detect import detect_ad_banners
 
 uvloop.install()
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(name)s %(levelname)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO,
+                    format="[%(asctime)s] %(name)s %(levelname)s: %(message)s")
 log = logging.getLogger("bot")
 
 DATA_DIR = "/app/data"
 SETTINGS_FILE = os.path.join(DATA_DIR, "user_settings.json")
+TG_LIMIT = int(1.99 * 1024 ** 3)          # ~2 GB Telegram cap
 _render_lock = asyncio.Lock()
+_pending: dict[int, dict] = {}            # uid -> active job (probe + src path)
+
+CORNER_CYCLE = ["TL", "TR", "BR", "BL"]
+FRAC_CYCLE = [0.08, 0.10, 0.13, 0.16, 0.20]
+
+DEFAULTS = {
+    "scroll_text": settings.scroll_text,
+    "scroll_seconds": 25.0,
+    "scroll_count": 8,           # 0 = continuous (every pass)
+    "cover_mode": "auto",        # auto | off
+    "width": 1920, "height": 1080, "fps": 25,
+    "bitrate": 2000,             # kbps (video)
+    "size_target_gb": 0.0,       # >0 -> auto bitrate to hit this size
+    "audio_k": 128,
+    "streamnxt_on": True, "streamnxt_corner": "TR",
+    "bidhaan_on": True, "bidhaan_corner": "TL",
+    "logo_frac": 0.13,
+}
 
 
-# ------------------------------------------------------------------ settings
+# ----------------------------------------------------------------- settings io
 def _load() -> dict:
     try:
         with open(SETTINGS_FILE) as f:
@@ -52,17 +76,15 @@ def _save(d: dict) -> None:
 
 def user_cfg(uid: int) -> dict:
     d = _load()
-    return d.get(str(uid), {
-        "scroll_text": settings.scroll_text,
-        "cover_mode": "auto",          # auto | off
-        "out_height": settings.out_height,
-        "preset": settings.x264_preset,
-    })
+    c = dict(DEFAULTS)
+    c.update(d.get(str(uid), {}))
+    return c
 
 
 def set_user(uid: int, **kw) -> dict:
     d = _load()
-    cur = d.get(str(uid), {})
+    cur = dict(DEFAULTS)
+    cur.update(d.get(str(uid), {}))
     cur.update(kw)
     d[str(uid)] = cur
     _save(d)
@@ -73,34 +95,126 @@ def _asset(name: str) -> str:
     return os.path.join(settings.assets_dir, name)
 
 
-# ------------------------------------------------------------------ gate
 def _allowed(uid: int) -> bool:
     return settings.owner_id == 0 or uid == settings.owner_id
 
 
-# ------------------------------------------------------------------ app
+# ----------------------------------------------------------------- estimate
+def _effective_bitrate(c: dict, dur: float) -> tuple[int, str]:
+    if c["size_target_gb"] > 0 and dur > 0:
+        vk = bitrate_for_target(dur, int(c["size_target_gb"] * 1024 ** 3), c["audio_k"])
+        return vk, f"{vk}k (auto → {c['size_target_gb']:g} GB)"
+    return c["bitrate"], f"{c['bitrate']}k"
+
+
+def _fmt_hms(s: float) -> str:
+    s = int(s)
+    return f"{s//3600}:{(s%3600)//60:02d}:{s%60:02d}"
+
+
+# ----------------------------------------------------------------- panel
+def panel(uid: int, job: dict) -> tuple[str, IKM]:
+    c = user_cfg(uid)
+    dur = job["duration"]
+    vk, br_label = _effective_bitrate(c, dur)
+    size = estimate_size_bytes(dur, vk, c["audio_k"])
+    warn = "  ⚠️ over 2GB" if size > TG_LIMIT else ""
+    res = "Source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
+    times = "every pass" if c["scroll_count"] == 0 else f"{c['scroll_count']}×"
+    logos = []
+    if c["streamnxt_on"]:
+        logos.append(f"StreamNxt[{c['streamnxt_corner']}]")
+    if c["bidhaan_on"]:
+        logos.append(f"Bidhaan[{c['bidhaan_corner']}]")
+
+    text = (
+        f"🎬 **Ready to render**\n"
+        f"`{job['name']}`\n"
+        f"⏳ {_fmt_hms(dur)}  •  src {job['w']}×{job['h']}\n\n"
+        f"📝 Caption: `{c['scroll_text']}`\n"
+        f"⏱ Scroll: {c['scroll_seconds']:g}s  •  🔁 {times}\n"
+        f"🖼 {res}  •  🎞 {c['fps']}fps  •  📐 {br_label}\n"
+        f"🏷 Logos: {', '.join(logos) or 'none'} ({int(c['logo_frac']*100)}%)\n"
+        f"🟥 Cover ads: {c['cover_mode']}\n\n"
+        f"💾 **Estimated size: {human_size(size)}**{warn}"
+    )
+    kb = IKM([
+        [IKB("⏱ Scroll time", "m:scroll"), IKB("🔁 Times", "m:times")],
+        [IKB("📐 Bitrate", "m:br"), IKB("🎯 Target size", "m:size")],
+        [IKB("🖼 Resolution", "m:res"), IKB("🎞 FPS", "m:fps")],
+        [IKB("🏷 Logo positions", "m:logos")],
+        [IKB(f"🟥 Cover: {c['cover_mode']}", "cover:toggle")],
+        [IKB("✅ Render now", "go"), IKB("❌ Cancel", "cancel")],
+    ])
+    return text, kb
+
+
+def _back_row():
+    return [IKB("⬅ Back", "m:main")]
+
+
+def submenu(which: str, uid: int, job: dict) -> IKM:
+    c = user_cfg(uid)
+    if which == "scroll":
+        rows = [[IKB(f"{'✅' if c['scroll_seconds']==s else ''}{s}s",
+                     f"s:scroll_seconds:{s}") for s in (5, 10, 15)],
+                [IKB(f"{'✅' if c['scroll_seconds']==s else ''}{s}s",
+                     f"s:scroll_seconds:{s}") for s in (20, 25, 30)]]
+        return IKM(rows + [_back_row()])
+    if which == "times":
+        opts = [3, 5, 8, 12, 20]
+        rows = [[IKB(f"{'✅' if c['scroll_count']==n else ''}{n}×",
+                     f"s:scroll_count:{n}") for n in opts]]
+        rows.append([IKB(("✅ " if c['scroll_count'] == 0 else "") + "Every pass (max)",
+                         "s:scroll_count:0")])
+        return IKM(rows + [_back_row()])
+    if which == "br":
+        opts = [1500, 2000, 2300, 2700, 3000, 3500]
+        rows = [[IKB(f"{'✅' if (c['size_target_gb']==0 and c['bitrate']==b) else ''}{b}",
+                     f"s:bitrate:{b}") for b in opts[i:i+3]] for i in (0, 3)]
+        return IKM(rows + [_back_row()])
+    if which == "size":
+        opts = [("Off", 0.0), ("1.5 GB", 1.5), ("1.9 GB", 1.9), ("2.0 GB", 2.0)]
+        rows = [[IKB(f"{'✅' if c['size_target_gb']==v else ''}{lbl}",
+                     f"s:size_target_gb:{v}") for lbl, v in opts]]
+        return IKM(rows + [_back_row()])
+    if which == "res":
+        opts = [("1920×1080", "1920x1080"), ("1280×720", "1280x720"), ("Source", "source")]
+        cur = "source" if c["width"] == 0 else f"{c['width']}x{c['height']}"
+        rows = [[IKB(f"{'✅' if cur==v else ''}{lbl}", f"s:res:{v}") for lbl, v in opts]]
+        return IKM(rows + [_back_row()])
+    if which == "fps":
+        rows = [[IKB(f"{'✅' if c['fps']==f else ''}{f}", f"s:fps:{f}")
+                 for f in (24, 25, 30)]]
+        return IKM(rows + [_back_row()])
+    if which == "logos":
+        sn = f"StreamNxt: {c['streamnxt_corner']} {'on' if c['streamnxt_on'] else 'OFF'}"
+        bd = f"Bidhaan: {c['bidhaan_corner']} {'on' if c['bidhaan_on'] else 'OFF'}"
+        rows = [
+            [IKB(f"↻ {sn}", "lg:streamnxt:corner"), IKB("⏻", "lg:streamnxt:toggle")],
+            [IKB(f"↻ {bd}", "lg:bidhaan:corner"), IKB("⏻", "lg:bidhaan:toggle")],
+            [IKB(f"Size: {int(c['logo_frac']*100)}%  (tap to change)", "lg:frac:cycle")],
+            _back_row(),
+        ]
+        return IKM(rows)
+    return IKM([_back_row()])
+
+
+# ----------------------------------------------------------------- app
 app = Client(
     name="bidhaan_logoedit",
-    api_id=settings.api_id,
-    api_hash=settings.api_hash,
-    bot_token=settings.bot_token,
-    workdir=DATA_DIR,
-    workers=20,
-    sleep_threshold=60,
-    max_concurrent_transmissions=8,
+    api_id=settings.api_id, api_hash=settings.api_hash, bot_token=settings.bot_token,
+    workdir=DATA_DIR, workers=20, sleep_threshold=60, max_concurrent_transmissions=8,
 )
 
 HELP = (
     "🎬 **Bidhaan Logo-Edit**\n\n"
-    "Send me a **video** and I'll return it branded automatically:\n"
-    "• StreamNxt logo top-right, Bidhaan TV top-left\n"
-    "• Your scrolling caption (name + number) bottom→up\n"
-    "• Ad / phone-number banners auto-covered with your red bar\n\n"
-    "**Commands**\n"
-    "/settings — show current settings\n"
-    "/text `your caption` — set the scrolling caption\n"
-    "/cover `auto`|`off` — toggle auto ad-covering\n"
-    "/quality `source`|`720` — output size (720 = faster)\n"
+    "Send me a **video**. A panel opens where you choose logo positions, scroll "
+    "timing, resolution, fps and bitrate (with a live size estimate). Tap "
+    "**Render** and I cover the ad/number banners, add your logos + caption, and "
+    "send it back.\n\n"
+    "/settings — show your saved defaults\n"
+    "/text `caption` — set the scrolling caption\n"
 )
 
 
@@ -116,13 +230,12 @@ async def _settings(_, m: Message):
     if not _allowed(m.from_user.id):
         return
     c = user_cfg(m.from_user.id)
-    await m.reply(
-        "⚙️ **Current settings**\n"
-        f"• Caption: `{c['scroll_text']}`\n"
-        f"• Auto-cover ads: `{c['cover_mode']}`\n"
-        f"• Quality: `{'source' if not c['out_height'] else str(c['out_height'])+'p'}`\n"
-        f"• Preset: `{c['preset']}`"
-    )
+    await m.reply("⚙️ **Saved defaults**\n```\n" +
+                  json.dumps({k: c[k] for k in (
+                      "scroll_text", "scroll_seconds", "scroll_count", "width",
+                      "height", "fps", "bitrate", "size_target_gb",
+                      "streamnxt_corner", "bidhaan_corner", "logo_frac",
+                      "cover_mode")}, indent=2) + "\n```")
 
 
 @app.on_message(filters.command("text") & filters.private)
@@ -133,32 +246,7 @@ async def _text(_, m: Message):
         return await m.reply("Usage: `/text ugaar ah bidhaan tv 0619624090`")
     new = m.text.split(None, 1)[1].strip()
     set_user(m.from_user.id, scroll_text=new)
-    await m.reply(f"✅ Caption set to:\n`{new}`")
-
-
-@app.on_message(filters.command("cover") & filters.private)
-async def _cover(_, m: Message):
-    if not _allowed(m.from_user.id):
-        return
-    arg = (m.command[1].lower() if len(m.command) > 1 else "")
-    if arg not in ("auto", "off"):
-        return await m.reply("Usage: `/cover auto` or `/cover off`")
-    set_user(m.from_user.id, cover_mode=arg)
-    await m.reply(f"✅ Auto-cover: `{arg}`")
-
-
-@app.on_message(filters.command("quality") & filters.private)
-async def _quality(_, m: Message):
-    if not _allowed(m.from_user.id):
-        return
-    arg = (m.command[1].lower() if len(m.command) > 1 else "")
-    if arg == "source":
-        set_user(m.from_user.id, out_height=0)
-    elif arg in ("720", "720p"):
-        set_user(m.from_user.id, out_height=720)
-    else:
-        return await m.reply("Usage: `/quality source` or `/quality 720`")
-    await m.reply(f"✅ Quality: `{arg}`")
+    await m.reply(f"✅ Caption set:\n`{new}`")
 
 
 @app.on_message((filters.video | filters.document) & filters.private)
@@ -166,100 +254,183 @@ async def _on_video(_, m: Message):
     uid = m.from_user.id
     if not _allowed(uid):
         return await m.reply("⛔ This bot is private.")
-
-    # only treat documents that are actually video
     if m.document and not (m.document.mime_type or "").startswith("video"):
         return
 
-    if _render_lock.locked():
-        await m.reply("⏳ I'm rendering another video — yours is queued, hang on.")
-
-    async with _render_lock:
-        await _process(m)
-
-
-async def _process(m: Message):
-    uid = m.from_user.id
-    c = user_cfg(uid)
-    job = str(int(time.time()))
-    work = os.path.join(settings.work_dir, job)
+    work = os.path.join(settings.work_dir, str(int(time.time())))
     os.makedirs(work, exist_ok=True)
     status = await m.reply("⬇️ Downloading…")
-
     try:
         src = await m.download(file_name=os.path.join(work, "src.mp4"))
-
-        # 1) detect ad banners
-        events = []
-        if c["cover_mode"] == "auto":
-            await status.edit("🔎 Scanning for ad / number banners…")
-            events = await asyncio.to_thread(
-                detect_ad_banners, src, work,
-                settings.detect_fps, settings.merge_gap,
-            )
-            await status.edit(
-                f"🔎 Found **{len(events)}** banner(s) to cover.\n🎨 Rendering… 0%"
-            )
-        else:
-            await status.edit("🎨 Rendering… 0%")
-
-        # 2) render (heavy) in a thread; progress polled via shared dict
-        cfg = RenderConfig(
-            logo_tr=_asset(settings.logo_tr),
-            logo_tl=_asset(settings.logo_tl),
-            cover_png=_asset(settings.cover_png),
-            scroll_text=c["scroll_text"],
-            x264_preset=c["preset"],
-            x264_crf=settings.x264_crf,
-            out_height=c["out_height"],
-        )
-        out = os.path.join(work, "branded.mp4")
-        prog = {"pct": 0.0}
-
-        def cb(p):
-            prog["pct"] = p
-
-        async def poller():
-            last = -1
-            while True:
-                await asyncio.sleep(8)
-                p = int(prog["pct"])
-                if p != last and p < 100:
-                    last = p
-                    try:
-                        await status.edit(
-                            f"🎨 Rendering… {p}%  "
-                            f"({len(events)} banner(s) covered)"
-                        )
-                    except Exception:
-                        pass
-
-        pt = asyncio.create_task(poller())
-        try:
-            await asyncio.to_thread(render, src, out, events, cfg, cb)
-        finally:
-            pt.cancel()
-
-        # 3) upload
-        await status.edit("⬆️ Uploading branded video…")
-        await m.reply_video(
-            out,
-            caption=f"✅ Branded — {len(events)} banner(s) covered.",
-        )
-        await status.delete()
-
+        w, h, dur = await asyncio.to_thread(probe, src)
+        name = (getattr(m.video, "file_name", None)
+                or getattr(m.document, "file_name", None) or "video.mp4")
+        _pending[uid] = {"src": src, "work": work, "w": w, "h": h,
+                         "duration": dur, "name": name, "msg": m}
+        text, kb = panel(uid, _pending[uid])
+        await status.edit(text, reply_markup=kb)
     except Exception as e:
-        log.exception("job failed")
+        log.exception("probe/download failed")
         await status.edit(f"❌ Failed: `{str(e)[:300]}`")
-    finally:
-        # cleanup work dir
+
+
+@app.on_callback_query()
+async def _cb(_, cq: CallbackQuery):
+    uid = cq.from_user.id
+    if not _allowed(uid):
+        return await cq.answer("private", show_alert=True)
+    job = _pending.get(uid)
+    data = cq.data
+
+    if data == "cancel":
+        _pending.pop(uid, None)
+        await cq.message.edit("❌ Cancelled.")
+        return await cq.answer()
+
+    if job is None:
+        return await cq.answer("Session expired — send the video again.", show_alert=True)
+
+    # navigation
+    if data == "m:main":
+        text, kb = panel(uid, job)
+        await cq.message.edit(text, reply_markup=kb)
+        return await cq.answer()
+    if data.startswith("m:"):
+        await cq.message.edit_reply_markup(submenu(data[2:], uid, job))
+        return await cq.answer()
+
+    # setting changes
+    if data.startswith("s:"):
+        _, key, val = data.split(":", 2)
+        if key == "scroll_seconds":
+            set_user(uid, scroll_seconds=float(val))
+        elif key == "scroll_count":
+            set_user(uid, scroll_count=int(val))
+        elif key == "bitrate":
+            set_user(uid, bitrate=int(val), size_target_gb=0.0)
+        elif key == "size_target_gb":
+            set_user(uid, size_target_gb=float(val))
+        elif key == "fps":
+            set_user(uid, fps=int(val))
+        elif key == "res":
+            if val == "source":
+                set_user(uid, width=0, height=0)
+            else:
+                w, h = val.split("x")
+                set_user(uid, width=int(w), height=int(h))
+        text, kb = panel(uid, job)
+        await cq.message.edit(text, reply_markup=kb)
+        return await cq.answer("✓")
+
+    if data.startswith("lg:"):
+        _, who, act = data.split(":", 2)
+        c = user_cfg(uid)
+        if act == "toggle":
+            set_user(uid, **{f"{who}_on": not c[f"{who}_on"]})
+        elif act == "corner":
+            nxt = CORNER_CYCLE[(CORNER_CYCLE.index(c[f"{who}_corner"]) + 1) % 4]
+            set_user(uid, **{f"{who}_corner": nxt})
+        elif act == "cycle" and who == "frac":
+            nxt = FRAC_CYCLE[(FRAC_CYCLE.index(c["logo_frac"]) + 1) % len(FRAC_CYCLE)
+                             if c["logo_frac"] in FRAC_CYCLE else 2]
+            set_user(uid, logo_frac=nxt)
+        await cq.message.edit_reply_markup(submenu("logos", uid, job))
+        return await cq.answer("✓")
+
+    if data == "cover:toggle":
+        c = user_cfg(uid)
+        set_user(uid, cover_mode=("off" if c["cover_mode"] == "auto" else "auto"))
+        text, kb = panel(uid, job)
+        await cq.message.edit(text, reply_markup=kb)
+        return await cq.answer("✓")
+
+    if data == "go":
+        await cq.answer("Starting…")
+        await _do_render(cq, uid, job)
+        return
+
+
+# ----------------------------------------------------------------- render
+async def _do_render(cq: CallbackQuery, uid: int, job: dict):
+    if _render_lock.locked():
+        await cq.message.edit("⏳ Another render is running — try again when it's done.")
+        return
+    async with _render_lock:
+        c = user_cfg(uid)
+        src, work, dur = job["src"], job["work"], job["duration"]
+        status = cq.message
         try:
-            for root, _dirs, files in os.walk(work, topdown=False):
-                for f in files:
-                    os.remove(os.path.join(root, f))
-                os.rmdir(root)
-        except OSError:
-            pass
+            # detection at render time (adaptive fps for long videos)
+            events = []
+            if c["cover_mode"] == "auto":
+                await status.edit("🔎 Scanning for ad / number banners…")
+                dfps = max(0.15, min(1.0, 1800.0 / dur)) if dur > 0 else 1.0
+                events = await asyncio.to_thread(
+                    detect_ad_banners, src, work, dfps, settings.merge_gap)
+
+            vk, _ = _effective_bitrate(c, dur)
+            logos = []
+            if c["streamnxt_on"]:
+                logos.append(Logo(_asset(settings.logo_tr), c["streamnxt_corner"], c["logo_frac"]))
+            if c["bidhaan_on"]:
+                logos.append(Logo(_asset(settings.logo_tl), c["bidhaan_corner"], c["logo_frac"]))
+
+            cfg = RenderConfig(
+                logos=logos, cover_png=_asset(settings.cover_png),
+                scroll_text=c["scroll_text"], scroll_seconds=c["scroll_seconds"],
+                scroll_count=(c["scroll_count"] or max(1, int(dur / max(2.0, c["scroll_seconds"])))),
+                width=(job["w"] if c["width"] == 0 else c["width"]),
+                height=(job["h"] if c["height"] == 0 else c["height"]),
+                fps=c["fps"], video_bitrate_k=vk, audio_bitrate_k=c["audio_k"],
+                preset=settings.x264_preset,
+            )
+            out = os.path.join(work, "branded.mp4")
+            prog = {"pct": 0.0}
+
+            async def poller():
+                last = -1
+                while True:
+                    await asyncio.sleep(8)
+                    p = int(prog["pct"])
+                    if p != last and p < 100:
+                        last = p
+                        try:
+                            await status.edit(
+                                f"🎨 Rendering… {p}%  ({len(events)} banner(s) covered)")
+                        except Exception:
+                            pass
+
+            pt = asyncio.create_task(poller())
+            try:
+                await asyncio.to_thread(render, src, out, events, cfg,
+                                        lambda p: prog.__setitem__("pct", p))
+            finally:
+                pt.cancel()
+
+            ow, oh, odur = await asyncio.to_thread(probe, out)
+            sz = os.path.getsize(out)
+            await status.edit(f"⬆️ Uploading… ({human_size(sz)})")
+            if sz > 2 * 1024 ** 3:
+                await job["msg"].reply(
+                    f"⚠️ File is {human_size(sz)} — over Telegram's 2GB limit. "
+                    f"Lower the bitrate / target size and render again.")
+            await job["msg"].reply_video(
+                out, duration=int(odur), width=ow, height=oh,
+                supports_streaming=True,
+                caption=f"✅ Branded — {len(events)} banner(s) covered • {human_size(sz)}")
+            await status.delete()
+        except Exception as e:
+            log.exception("render failed")
+            await status.edit(f"❌ Failed: `{str(e)[:300]}`")
+        finally:
+            _pending.pop(uid, None)
+            try:
+                for root, _d, files in os.walk(work, topdown=False):
+                    for f in files:
+                        os.remove(os.path.join(root, f))
+                    os.rmdir(root)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
