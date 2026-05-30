@@ -54,7 +54,7 @@ class Settings:
 
     # ---- Encode tuning ----
     # x264 preset: ultrafast..veryslow. faster = quicker render, slightly bigger file.
-    x264_preset: str = field(default_factory=lambda: _str("X264_PRESET", default="veryfast"))
+    x264_preset: str = field(default_factory=lambda: _str("X264_PRESET", default="ultrafast"))
     x264_crf:    int = field(default_factory=lambda: _int("X264_CRF", default=21))
     # downscale output to this height (0 = keep source). 720 ~ halves render time.
     out_height:  int = field(default_factory=lambda: _int("OUT_HEIGHT", default=0))

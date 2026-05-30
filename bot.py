@@ -55,7 +55,7 @@ DEFAULTS = {
     "bitrate": 2000,             # kbps (video)
     "size_target_gb": 0.0,       # >0 -> auto bitrate to hit this size
     "audio_k": 128,
-    "streamnxt_on": True, "streamnxt_corner": "TL",
+    "streamnxt_on": False, "streamnxt_corner": "TL",
     "streamnxt_frac": 0.195, "streamnxt_mx": 0.032, "streamnxt_my": 0.095,
     "bidhaan_on": True, "bidhaan_corner": "TR",
     "bidhaan_frac": 0.134, "bidhaan_mx": 0.012, "bidhaan_my": 0.091,
@@ -166,9 +166,9 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
                      f"s:scroll_seconds:{s}") for s in (20, 25, 30)]]
         return IKM(rows + [_back_row()])
     if which == "times":
-        opts = [3, 5, 8, 12, 20]
+        opts = [1, 3, 5, 8, 10, 12, 20]
         rows = [[IKB(f"{'✅' if c['scroll_count']==n else ''}{n}×",
-                     f"s:scroll_count:{n}") for n in opts]]
+                     f"s:scroll_count:{n}") for n in opts[i:i+4]] for i in (0, 4)]
         rows.append([IKB(("✅ " if c['scroll_count'] == 0 else "") + "Every pass (max)",
                          "s:scroll_count:0")])
         return IKM(rows + [_back_row()])

@@ -119,7 +119,11 @@ def build_filter(src_w: int, src_h: int, duration: float,
     margin = max(8, int(out_w * 0.015))
     fontsize = max(18, int(out_h * 0.030))
 
-    parts: list[str] = ["[0:v]scale=%d:%d,setsar=1[base]" % (out_w, out_h)]
+    # skip the scale entirely when output == source (saves a full rescale pass)
+    if out_w == src_w and out_h == src_h:
+        parts: list[str] = ["[0:v]setsar=1[base]"]
+    else:
+        parts = ["[0:v]scale=%d:%d,setsar=1[base]" % (out_w, out_h)]
 
     # cover bars  ([1]=cover png)
     cur = "base"

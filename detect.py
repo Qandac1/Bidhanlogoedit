@@ -48,14 +48,32 @@ class CoverEvent:
         return CoverEvent(self.start, self.end, x, y, w, h)
 
 
-def _extract_frames(video: str, out_dir: str, fps: float, width: int = 640) -> int:
-    """Dump scaled JPEG frames at `fps`. Returns frame count."""
+def _keyframe_times(video: str) -> list[float]:
+    """Keyframe timestamps via ffprobe — fast, no decoding."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v", "-skip_frame", "nokey",
+         "-show_entries", "frame=best_effort_timestamp_time", "-of", "csv=p=0", video],
+        capture_output=True, text=True,
+    ).stdout
+    ts = []
+    for line in out.splitlines():
+        line = line.strip().rstrip(",")
+        try:
+            ts.append(float(line))
+        except ValueError:
+            pass
+    return sorted(ts)
+
+
+def _extract_keyframes(video: str, out_dir: str, width: int = 640) -> int:
+    """Decode ONLY keyframes (decode-light) -> scaled JPEGs. Returns count."""
     os.makedirs(out_dir, exist_ok=True)
     for f in glob.glob(os.path.join(out_dir, "*.jpg")):
         os.remove(f)
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", video,
-        "-vf", f"fps={fps},scale={width}:-1", os.path.join(out_dir, "f_%06d.jpg"),
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-skip_frame", "nokey",
+        "-i", video, "-vsync", "0", "-vf", f"scale={width}:-1",
+        os.path.join(out_dir, "f_%06d.jpg"),
     ]
     subprocess.run(cmd, check=True)
     return len(glob.glob(os.path.join(out_dir, "*.jpg")))
@@ -130,19 +148,37 @@ def detect_ad_banners(
     fps: float = 1.0,
     merge_gap: float = 2.5,
     use_ocr: bool = True,
-    min_duration: float = 4.0,
-    min_coverage: float = 0.5,
+    min_duration: float = 3.0,
+    min_coverage: float = 0.3,
 ) -> list[CoverEvent]:
-    """Full pipeline: sample -> detect -> merge into cover events."""
+    """Full pipeline: keyframe-sample -> detect -> merge into cover events.
+
+    Scans only KEYFRAMES (decode-light) instead of decoding the whole video —
+    ad banners persist for seconds so keyframe density is plenty, and this is
+    dramatically faster on long (2h+) movies. `fps` is kept for signature compat
+    but ignored; timing comes from the real keyframe timestamps.
+    """
     frames_dir = os.path.join(work_dir, "frames")
-    n = _extract_frames(video, frames_dir, fps)
-    log.info("detect: sampled %d frames at %.2f fps", n, fps)
+    times = _keyframe_times(video)
+    n = _extract_keyframes(video, frames_dir)
+    files = sorted(glob.glob(os.path.join(frames_dir, "*.jpg")))
+    m = min(len(files), len(times))
+    files, times = files[:m], times[:m]
+    if m < 2:
+        log.info("detect: too few keyframes (%d)", m)
+        return []
+    spacing = max(0.5, (times[-1] - times[0]) / max(1, m - 1))
+    # A recurring banner sits in the SAME spot but the sparse keyframe scan can
+    # miss it between hits. Merge same-location detections across a generous gap
+    # so the cover is CONTINUOUS over its active span — over-covering a fixed
+    # bottom strip briefly is fine; leaking a phone number is not.
+    merge_gap = max(merge_gap, 4.0 * spacing, 15.0)
+    log.info("detect: %d keyframes, ~%.1fs apart, merge_gap=%.0fs", m, spacing, merge_gap)
 
     # per-timestamp detections; remember which boxes had digits (phone signal)
     dets: list[tuple[float, tuple[float, float, float, float], bool]] = []
-    files = sorted(glob.glob(os.path.join(frames_dir, "*.jpg")))
     for idx, fp in enumerate(files):
-        t = idx / fps
+        t = times[idx]
         img = cv2.imread(fp)
         if img is None:
             continue
@@ -183,10 +219,10 @@ def detect_ad_banners(
                            "hits": 1, "digits": int(has_dig)})
 
     events: list[CoverEvent] = []
-    step = 1.0 / fps
+    step = spacing
     for tr in tracks:
         dur = tr["end"] - tr["start"] + step
-        span_frames = max(1, round((tr["end"] - tr["start"]) * fps) + 1)
+        span_frames = max(1, round((tr["end"] - tr["start"]) / spacing) + 1)
         coverage = tr["hits"] / span_frames
         # A real banner: lasts a while, is present in most frames of its span,
         # and (if OCR available) shows digits at least once.
@@ -203,6 +239,33 @@ def detect_ad_banners(
             x=x, y=y, w=w, h=h,
         ).padded())
 
+    # --- Post-merge by horizontal band ---------------------------------
+    # These broadcaster banners SLIDE in/out, so a single banner fragments into
+    # several boxes at different x. Merge everything sharing a vertical band into
+    # ONE continuous cover with the UNION box, spanning first->last appearance.
+    # This is how John covers manually (one bar over the whole active segment)
+    # and guarantees a sliding phone number can't leak between samples.
+    LINK_GAP = 60.0
+
+    def _voverlap(a: CoverEvent, b: CoverEvent) -> bool:
+        top, bot = max(a.y, b.y), min(a.y + a.h, b.y + b.h)
+        inter = max(0.0, bot - top)
+        return inter / max(1e-6, min(a.h, b.h)) > 0.5
+
     events.sort(key=lambda e: e.start)
-    log.info("detect: %d cover events", len(events))
-    return events
+    bands: list[CoverEvent] = []
+    for e in events:
+        hit = next((b for b in bands
+                    if _voverlap(e, b) and e.start <= b.end + LINK_GAP), None)
+        if hit:
+            nx, ny = min(hit.x, e.x), min(hit.y, e.y)
+            nx2 = max(hit.x + hit.w, e.x + e.w)
+            ny2 = max(hit.y + hit.h, e.y + e.h)
+            hit.x, hit.y, hit.w, hit.h = nx, ny, nx2 - nx, ny2 - ny
+            hit.start, hit.end = min(hit.start, e.start), max(hit.end, e.end)
+        else:
+            bands.append(CoverEvent(e.start, e.end, e.x, e.y, e.w, e.h))
+
+    bands.sort(key=lambda e: e.start)
+    log.info("detect: %d cover bands (from %d raw)", len(bands), len(events))
+    return bands
