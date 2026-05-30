@@ -54,7 +54,11 @@ DEFAULTS = {
     "scroll_seconds": 25.0,
     "scroll_count": 8,           # 0 = continuous (every pass)
     "scroll_times": [],          # exact minute marks (overrides count when set)
-    "brand_start_min": 0.0,      # logos/caption/cover start after this minute (skip intro)
+    "caption_scale": 0.023,      # caption font size (fraction of height)
+    # per-element start minutes (skip intro). 0 = from start.
+    "logo_start_min": 0.0,
+    "cover_start_min": 0.0,
+    "text_start_min": 0.0,
     "cover_mode": "auto",        # auto | off
     "width": 1920, "height": 1080, "fps": 25,
     "bitrate": 2000,             # kbps (video)
@@ -154,9 +158,12 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
         f"⏱ Scroll: {c['scroll_seconds']:g}s  •  🔁 {times}\n"
         f"🖼 {res}  •  🎞 {c['fps']}fps  •  📐 {br_label}\n"
         f"🏷 Logos: {', '.join(logos) or 'none'} (size {int(c['logo_scale']*100)}%)\n"
-        f"🟥 Cover ads: {c['cover_mode']}"
-        + (f"  •  ▶️ starts at {c['brand_start_min']:g}min" if c.get('brand_start_min') else "")
-        + "\n\n"
+        f"🟥 Cover ads: {c['cover_mode']}\n"
+        + (f"▶️ Start — logo:{c.get('logo_start_min',0):g}m "
+           f"cover:{c.get('cover_start_min',0):g}m text:{c.get('text_start_min',0):g}m\n"
+           if (c.get('logo_start_min') or c.get('cover_start_min') or c.get('text_start_min'))
+           else "")
+        + "\n"
         f"💾 **Estimated size: {human_size(size)}**{warn}"
     )
     kb = IKM([
@@ -243,6 +250,8 @@ HELP = (
     "/at `1 3 12 24` — show the caption at exact minute marks "
     "(send `/at` alone to clear)\n"
     "/begin `2` — start logo/caption/cover at minute 2 (skip an intro)\n"
+    "/logoat · /coverat · /textat `2.5` — start each element separately\n"
+    "/capsize `small`|`normal`|`big` — caption size\n"
 )
 
 
@@ -288,12 +297,54 @@ async def _begin(_, m: Message):
         mins = float(m.command[1].replace(",", "."))
     except ValueError:
         return await m.reply("Give a number of minutes, e.g. `/begin 2`")
-    set_user(m.from_user.id, brand_start_min=max(0.0, mins))
+    mins = max(0.0, mins)
+    set_user(m.from_user.id, logo_start_min=mins, cover_start_min=mins, text_start_min=mins)
     if mins <= 0:
-        await m.reply("✅ Branding starts from the very beginning.")
+        await m.reply("✅ Everything starts from the very beginning.")
     else:
-        await m.reply(f"✅ Logo, caption & banner-cover will start at **{mins:g} min** "
-                      f"(the first {mins:g} min / intro stays clean).")
+        await m.reply(f"✅ Logo, caption & banner-cover all start at **{mins:g} min** "
+                      f"(first {mins:g} min / intro stays clean).\n"
+                      f"To set them separately: `/logoat 2`, `/coverat 2.5`, `/textat 3`")
+
+
+async def _set_start(m: Message, key: str, label: str):
+    if not _allowed(m.from_user.id):
+        return
+    if len(m.command) < 2:
+        return await m.reply(f"Usage: `/{m.command[0]} 2.5`  → {label} starts at minute 2.5")
+    try:
+        mins = max(0.0, float(m.command[1].replace(",", ".")))
+    except ValueError:
+        return await m.reply("Give minutes, e.g. `2` or `2.5`")
+    set_user(m.from_user.id, **{key: mins})
+    await m.reply(f"✅ {label} starts at **{mins:g} min**.")
+
+
+@app.on_message(filters.command("logoat") & filters.private)
+async def _logoat(_, m: Message):
+    await _set_start(m, "logo_start_min", "Logo")
+
+
+@app.on_message(filters.command("coverat") & filters.private)
+async def _coverat(_, m: Message):
+    await _set_start(m, "cover_start_min", "Banner-cover")
+
+
+@app.on_message(filters.command("textat") & filters.private)
+async def _textat(_, m: Message):
+    await _set_start(m, "text_start_min", "Caption")
+
+
+@app.on_message(filters.command("capsize") & filters.private)
+async def _capsize(_, m: Message):
+    if not _allowed(m.from_user.id):
+        return
+    arg = (m.command[1].lower() if len(m.command) > 1 else "")
+    sizes = {"small": 0.018, "normal": 0.023, "big": 0.030}
+    if arg not in sizes:
+        return await m.reply("Usage: `/capsize small|normal|big`")
+    set_user(m.from_user.id, caption_scale=sizes[arg])
+    await m.reply(f"✅ Caption size: `{arg}`")
 
 
 @app.on_message(filters.command("at") & filters.private)
@@ -463,7 +514,10 @@ async def _do_render(cq: CallbackQuery, uid: int, job: dict):
                 scroll_text=c["scroll_text"], scroll_seconds=c["scroll_seconds"],
                 scroll_count=(c["scroll_count"] or max(1, int(dur / max(2.0, c["scroll_seconds"])))),
                 scroll_times=[mn * 60 for mn in c.get("scroll_times", []) if mn * 60 < dur],
-                brand_start=c.get("brand_start_min", 0.0) * 60,
+                caption_scale=c.get("caption_scale", 0.023),
+                logo_start=c.get("logo_start_min", 0.0) * 60,
+                cover_start=c.get("cover_start_min", 0.0) * 60,
+                text_start=c.get("text_start_min", 0.0) * 60,
                 width=(job["w"] if c["width"] == 0 else c["width"]),
                 height=(job["h"] if c["height"] == 0 else c["height"]),
                 fps=c["fps"], video_bitrate_k=vk, audio_bitrate_k=c["audio_k"],

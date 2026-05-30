@@ -164,10 +164,14 @@ def _find_phone_boxes(img: np.ndarray) -> list[tuple[float, float, float, float]
     if not _HAS_OCR:
         return []
     H, W = img.shape[:2]
+    # only the BOTTOM strip — banners live there; scanning the whole frame
+    # caught scene text/numbers (clocks, signs, dialogue) -> false covers.
+    y0 = int(0.58 * H)
+    region = img[y0:, :]
     boxes: list[tuple[float, float, float, float]] = []
     try:
         from pytesseract import Output
-        data = pytesseract.image_to_data(img, config="--psm 11",
+        data = pytesseract.image_to_data(region, config="--psm 11",
                                          output_type=Output.DICT)
     except Exception:
         return []
@@ -175,9 +179,8 @@ def _find_phone_boxes(img: np.ndarray) -> list[tuple[float, float, float, float]
         if _max_digit_run(txt) >= 6:
             x, y = data["left"][i], data["top"][i]
             w, h = data["width"][i], data["height"][i]
-            # widen to cover the banner strip around the number
             nx = max(0.0, (x - w * 0.6) / W)
-            ny = max(0.0, (y - h * 0.8) / H)
+            ny = max(0.0, (y + y0 - h * 0.8) / H)
             nw = min(1.0 - nx, (w * 2.2) / W)
             nh = min(1.0 - ny, (h * 2.6) / H)
             boxes.append((nx, ny, nw, nh))
