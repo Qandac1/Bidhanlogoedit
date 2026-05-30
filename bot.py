@@ -65,8 +65,9 @@ DEFAULTS = {
     "bidhaan_frac": 0.134, "bidhaan_mx": 0.012, "bidhaan_my": 0.091,
     # second Bidhaan, top-left, offset right so it sits NEXT TO the channel's
     # own logo (e.g. 'a tv' on Kurulus) instead of overlapping it
+    # measured exactly off John's reference pic: width 13.2%, left 3.8%, top 10.1%
     "bidhaan2_on": True, "bidhaan2_corner": "TL",
-    "bidhaan2_frac": 0.25, "bidhaan2_mx": 0.012, "bidhaan2_my": 0.06,
+    "bidhaan2_frac": 0.132, "bidhaan2_mx": 0.038, "bidhaan2_my": 0.10,
     "logo_scale": 1.0,           # global multiplier on logo sizes
 }
 
