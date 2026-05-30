@@ -61,7 +61,7 @@ DEFAULTS = {
     "audio_k": 128,
     "streamnxt_on": False, "streamnxt_corner": "TL",
     "streamnxt_frac": 0.195, "streamnxt_mx": 0.032, "streamnxt_my": 0.095,
-    "bidhaan_on": True, "bidhaan_corner": "TR",
+    "bidhaan_on": False, "bidhaan_corner": "TR",
     "bidhaan_frac": 0.134, "bidhaan_mx": 0.012, "bidhaan_my": 0.091,
     # second Bidhaan, top-left, offset right so it sits NEXT TO the channel's
     # own logo (e.g. 'a tv' on Kurulus) instead of overlapping it
