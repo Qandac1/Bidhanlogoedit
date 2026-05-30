@@ -129,10 +129,10 @@ def _find_red_banners(img: np.ndarray) -> list[tuple[float, float, float, float]
         short = 0.02 <= nh <= 0.28
         banner_aspect = (nw / nh) >= 2.2 if nh > 0 else False
         reasonable_area = 0.006 <= area_frac <= 0.22
-        # --- zone: bottom strip (phone bars) or a top corner (channel bug) ---
-        in_bottom = (ny + nh) >= 0.66
-        in_top = ny <= 0.16
-        in_zone = in_bottom or in_top
+        # --- zone: bottom strip only (Fanproj promos sit at the bottom). NOT the
+        # top, where the channel/StreamNxt watermark logos live (those aren't
+        # ad banners and were causing false covers). ---
+        in_zone = (ny + nh) >= 0.66
         # red fill density inside the box (reject sparse red speckle)
         sub = mask[y:y + h, x:x + w]
         dense = sub.size > 0 and (cv2.countNonZero(sub) / sub.size) >= 0.45
