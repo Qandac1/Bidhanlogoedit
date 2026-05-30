@@ -210,27 +210,33 @@ def _load_templates():
 
 
 def _find_template_banners(gray: np.ndarray) -> list[tuple[float, float, float, float]]:
-    """Match known recurring banners (e.g. Fanproj CHANNELS strip) by their exact
-    look — reliable, catches them everywhere with no false positives. Templates
-    were cropped from 1920-wide frames, so scale to this frame's width."""
+    """Match known recurring banners (Fanproj CHANNELS strip) by their look.
+    Search ONLY the bottom strip (where banners live -> avoids false matches in
+    the scene) and try a wide range of sizes (sources vary 240p..1080p).
+    Templates were cropped from frames scaled to W=960."""
     out = []
     H, W = gray.shape[:2]
-    base = W / 1920.0
+    y0 = int(0.62 * H)
+    region = gray[y0:, :]
+    rH = region.shape[0]
+    base = W / 960.0
     for _name, tmpl in _load_templates():
         best = None
-        for s in (0.85, 1.0, 1.15):
+        for s in (0.55, 0.7, 0.85, 1.0, 1.2, 1.45):
             tw, th = int(tmpl.shape[1] * base * s), int(tmpl.shape[0] * base * s)
-            if tw < 12 or th < 12 or tw >= W or th >= H:
+            if tw < 12 or th < 12 or tw >= W or th >= rH:
                 continue
-            res = cv2.matchTemplate(gray, cv2.resize(tmpl, (tw, th)),
+            res = cv2.matchTemplate(region, cv2.resize(tmpl, (tw, th)),
                                     cv2.TM_CCOEFF_NORMED)
             _mn, mv, _ml, ml = cv2.minMaxLoc(res)
             if best is None or mv > best[0]:
                 best = (mv, ml, tw, th)
-        if best and best[0] >= 0.60:
+        if best and best[0] >= 0.62:
             _, (lx, ly), tw, th = best
-            nx, ny, nw, nh = lx / W, ly / H, tw / W, th / H
-            nw = min(1.0 - nx, nw * 1.5)   # extend to full banner (logo+icons+box)
+            nx = lx / W
+            ny = (ly + y0) / H
+            nw = min(1.0 - nx, (tw / W) * 1.7)   # extend to full banner width
+            nh = th / H
             out.append((nx, ny, nw, nh))
     return out
 
