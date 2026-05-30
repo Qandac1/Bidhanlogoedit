@@ -59,7 +59,11 @@ DEFAULTS = {
     "streamnxt_frac": 0.195, "streamnxt_mx": 0.032, "streamnxt_my": 0.095,
     "bidhaan_on": True, "bidhaan_corner": "TR",
     "bidhaan_frac": 0.134, "bidhaan_mx": 0.012, "bidhaan_my": 0.091,
-    "logo_scale": 1.0,           # global multiplier on both logo sizes
+    # second Bidhaan, top-left, offset right so it sits NEXT TO the channel's
+    # own logo (e.g. 'a tv' on Kurulus) instead of overlapping it
+    "bidhaan2_on": True, "bidhaan2_corner": "TL",
+    "bidhaan2_frac": 0.134, "bidhaan2_mx": 0.14, "bidhaan2_my": 0.091,
+    "logo_scale": 1.0,           # global multiplier on logo sizes
 }
 
 
@@ -130,6 +134,8 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
         logos.append(f"StreamNxt[{c['streamnxt_corner']}]")
     if c["bidhaan_on"]:
         logos.append(f"Bidhaan[{c['bidhaan_corner']}]")
+    if c["bidhaan2_on"]:
+        logos.append(f"Bidhaan[{c['bidhaan2_corner']}]")
 
     text = (
         f"🎬 **Ready to render**\n"
@@ -193,10 +199,12 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
         return IKM(rows + [_back_row()])
     if which == "logos":
         sn = f"StreamNxt: {c['streamnxt_corner']} {'on' if c['streamnxt_on'] else 'OFF'}"
-        bd = f"Bidhaan: {c['bidhaan_corner']} {'on' if c['bidhaan_on'] else 'OFF'}"
+        bd = f"Bidhaan R: {c['bidhaan_corner']} {'on' if c['bidhaan_on'] else 'OFF'}"
+        b2 = f"Bidhaan L: {c['bidhaan2_corner']} {'on' if c['bidhaan2_on'] else 'OFF'}"
         rows = [
             [IKB(f"↻ {sn}", "lg:streamnxt:corner"), IKB("⏻", "lg:streamnxt:toggle")],
             [IKB(f"↻ {bd}", "lg:bidhaan:corner"), IKB("⏻", "lg:bidhaan:toggle")],
+            [IKB(f"↻ {b2}", "lg:bidhaan2:corner"), IKB("⏻", "lg:bidhaan2:toggle")],
             [IKB(f"Size: {int(c['logo_scale']*100)}%  (tap to change)", "lg:scale:cycle")],
             _back_row(),
         ]
@@ -380,6 +388,9 @@ async def _do_render(cq: CallbackQuery, uid: int, job: dict):
             if c["bidhaan_on"]:
                 logos.append(Logo(_asset(settings.logo_tl), c["bidhaan_corner"],
                                   c["bidhaan_frac"] * sc, c["bidhaan_mx"], c["bidhaan_my"]))
+            if c["bidhaan2_on"]:
+                logos.append(Logo(_asset(settings.logo_tl), c["bidhaan2_corner"],
+                                  c["bidhaan2_frac"] * sc, c["bidhaan2_mx"], c["bidhaan2_my"]))
 
             cfg = RenderConfig(
                 logos=logos, cover_png=_asset(settings.cover_png),
