@@ -213,8 +213,9 @@ def detect_ad_banners(
     merge_gap = max(merge_gap, 4.0 * spacing, 15.0)
     log.info("detect: %d keyframes, ~%.1fs apart, merge_gap=%.0fs", m, spacing, merge_gap)
 
-    # per-timestamp detections; remember which boxes had digits (phone signal)
-    dets: list[tuple[float, tuple[float, float, float, float], bool]] = []
+    # per-timestamp detections: (t, box, has_phone, is_red). is_red boxes give
+    # the TIGHT banner geometry; phone-only boxes are confirmation/fallback.
+    dets: list = []
     for idx, fp in enumerate(files):
         t = times[idx]
         img = cv2.imread(fp)
@@ -230,14 +231,11 @@ def detect_ad_banners(
                     return True
             return False
 
-        # Red bars give the reliable SPAN+LOCATION; mark each with whether a real
-        # phone number sits in it this frame (confirmation signal).
         for rb in red_boxes:
-            dets.append((t, rb, _phone_here(rb)))
-        # phone numbers NOT inside any red bar (non-red number banner) -> cover too
+            dets.append((t, rb, _phone_here(rb), True))
         for pb in phone_boxes:
             if not any(_iou(pb, rb) > 0.01 for rb in red_boxes):
-                dets.append((t, pb, True))
+                dets.append((t, pb, True, False))
 
     # cleanup frames to save disk
     for fp in files:
@@ -250,10 +248,25 @@ def detect_ad_banners(
         log.info("detect: no ad banners found")
         return []
 
-    # cluster into tracks by spatial overlap + temporal continuity; keep ALL
-    # member boxes so we can size the cover tightly later (not by union).
+    import statistics as st
+
+    def _box_from(boxes: list) -> tuple[float, float, float, float]:
+        """Tight cover box that fits the actual banner: use only the RED banner
+        boxes (phone-only boxes are confirmation, not geometry). UNION
+        horizontally (covers the slide), MEDIAN vertically (banner row is
+        constant -> ignores outliers). No bottom-snap, so it matches the bar."""
+        reds = [b for b, is_red in boxes if is_red]
+        use = reds if reds else [b for b, _ in boxes]
+        x = min(b[0] for b in use)
+        x2 = max(b[0] + b[2] for b in use)
+        y = st.median([b[1] for b in use])
+        y2 = st.median([b[1] + b[3] for b in use])
+        return (x, y, x2 - x, y2 - y)
+
+    # cluster into tracks by spatial overlap + temporal continuity; keep member
+    # boxes (with red flag) so we can size the cover tightly later.
     tracks: list[dict] = []
-    for t, box, has_dig in dets:
+    for t, box, has_dig, is_red in dets:
         placed = False
         for tr in tracks:
             if t - tr["last_t"] <= merge_gap and _iou(tr["rep"], box) >= 0.4:
@@ -261,28 +274,15 @@ def detect_ad_banners(
                 tr["last_t"] = t
                 tr["hits"] += 1
                 tr["digits"] += int(has_dig)
-                tr["boxes"].append(box)
+                tr["boxes"].append((box, is_red))
                 tr["rep"] = box
                 placed = True
                 break
         if not placed:
             tracks.append({"start": t, "end": t, "last_t": t, "rep": box,
-                           "boxes": [box], "hits": 1, "digits": int(has_dig)})
+                           "boxes": [(box, is_red)], "hits": 1, "digits": int(has_dig)})
 
     LINK_GAP = 60.0
-
-    def _box_from(boxes: list) -> tuple[float, float, float, float]:
-        """Tight cover box: UNION horizontally (covers the slide), MEDIAN
-        vertically (the banner's row is constant — ignores high outliers), and
-        snap the bottom to the frame edge if the bar sits at the bottom."""
-        import statistics as st
-        x = min(b[0] for b in boxes)
-        x2 = max(b[0] + b[2] for b in boxes)
-        y = st.median([b[1] for b in boxes])
-        y2 = st.median([b[1] + b[3] for b in boxes])
-        if y2 >= 0.86:
-            y2 = 1.0
-        return (x, y, x2 - x, y2 - y)
 
     # tracks -> events (filtered), carrying member boxes
     step = spacing
@@ -324,7 +324,13 @@ def detect_ad_banners(
     out: list[CoverEvent] = []
     for b in bands:
         x, y, w, h = b["rep"]
-        out.append(CoverEvent(b["start"], b["end"], x, y, w, h, b["digits"]).padded())
+        # Cover from the moment it arrives: extend the start back a little, and
+        # snap to 0 if the banner shows up in the first few seconds (keyframe
+        # sampling can miss the very start).
+        start = max(0.0, b["start"] - 1.5 * spacing)
+        if start < 6.0:
+            start = 0.0
+        out.append(CoverEvent(start, b["end"], x, y, w, h, b["digits"]).padded())
     out.sort(key=lambda e: e.start)
     log.info("detect: %d cover bands", len(out))
     return out
