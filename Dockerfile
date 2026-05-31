@@ -14,8 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     fonts-dejavu-core \
     ca-certificates \
-    rclone \
+    curl unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Official rclone (the Debian package is built WITHOUT the MEGA backend) — this
+# static build includes mega.
+RUN curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip \
+    && unzip -j /tmp/rclone.zip "*/rclone" -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/rclone \
+    && rm /tmp/rclone.zip
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
