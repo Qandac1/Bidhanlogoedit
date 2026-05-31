@@ -18,6 +18,7 @@ import logging
 
 import uvloop
 from pyrogram import Client, filters
+from pyrogram.errors import SessionPasswordNeeded
 from pyrogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB,
@@ -29,6 +30,7 @@ from branding import (
     estimate_size_bytes, bitrate_for_target, human_size,
 )
 from detect import detect_ad_banners
+import delivery
 
 uvloop.install()
 logging.basicConfig(level=logging.INFO,
@@ -37,9 +39,13 @@ log = logging.getLogger("bot")
 
 DATA_DIR = "/app/data"
 SETTINGS_FILE = os.path.join(DATA_DIR, "user_settings.json")
-TG_LIMIT = int(1.99 * 1024 ** 3)          # ~2 GB Telegram cap
+PREMIUM_SESSION_FILE = os.path.join(DATA_DIR, "premium_session.txt")
+TG_LIMIT = int(1.95 * 1024 ** 3)          # ~2 GB Telegram bot cap
+PREMIUM_LIMIT = int(3.9 * 1024 ** 3)      # ~4 GB Telegram premium cap
+os.environ.setdefault("RCLONE_CONFIG", delivery.RCLONE_CONF)
 _render_lock = asyncio.Lock()
 _pending: dict[int, dict] = {}            # uid -> active job (probe + src path)
+_login: dict[int, dict] = {}              # uid -> premium-login flow state
 
 CORNER_CYCLE = ["TL", "TR", "BR", "BL"]
 SCALE_CYCLE = [0.8, 0.9, 1.0, 1.1, 1.25]
@@ -117,6 +123,30 @@ def _allowed(uid: int) -> bool:
     return settings.owner_id == 0 or uid == settings.owner_id
 
 
+# ----------------------------------------------------------------- premium
+def _premium_session() -> str | None:
+    try:
+        s = open(PREMIUM_SESSION_FILE).read().strip()
+        return s or None
+    except OSError:
+        return None
+
+
+async def _premium_send(out_path: str, caption: str, duration: int,
+                        w: int, h: int) -> None:
+    """Upload via the owner's logged-in PREMIUM account (up to 4GB) -> the
+    owner's Saved Messages (the bot itself can't send >2GB)."""
+    sess = _premium_session()
+    pu = Client("premium_up", api_id=settings.api_id, api_hash=settings.api_hash,
+                session_string=sess, in_memory=True, no_updates=True)
+    await pu.start()
+    try:
+        await pu.send_video("me", out_path, caption=caption, duration=duration,
+                            width=w, height=h, supports_streaming=True)
+    finally:
+        await pu.stop()
+
+
 # ----------------------------------------------------------------- estimate
 def _effective_bitrate(c: dict, dur: float) -> tuple[int, str]:
     if c["size_target_gb"] > 0 and dur > 0:
@@ -136,7 +166,15 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
     dur = job["duration"]
     vk, br_label = _effective_bitrate(c, dur)
     size = estimate_size_bytes(dur, vk, c["audio_k"])
-    warn = "  ⚠️ over 2GB" if size > TG_LIMIT else ""
+    if size > TG_LIMIT:
+        if _premium_session() and size <= PREMIUM_LIMIT:
+            warn = "  → via premium (4GB)"
+        elif delivery.mega_is_configured():
+            warn = "  → via MEGA link"
+        else:
+            warn = "  ⚠️ over 2GB (set /loginpremium or /megalogin)"
+    else:
+        warn = ""
     res = "Source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
     if c.get("scroll_times"):
         times = "@ " + ", ".join(f"{x:g}m" for x in c["scroll_times"])
@@ -251,7 +289,10 @@ HELP = (
     "(send `/at` alone to clear)\n"
     "/begin `2` — start logo/caption/cover at minute 2 (skip an intro)\n"
     "/logoat · /coverat · /textat `2.5` — start each element separately\n"
-    "/capsize `small`|`normal`|`big` — caption size\n"
+    "/capsize `small`|`normal`|`big` — caption size\n\n"
+    "**Big files (2GB+)**\n"
+    "/loginpremium — connect your premium account → send up to 4GB\n"
+    "/megalogin `email pass` — send 2GB+ videos as a MEGA link\n"
 )
 
 
@@ -345,6 +386,103 @@ async def _capsize(_, m: Message):
         return await m.reply("Usage: `/capsize small|normal|big`")
     set_user(m.from_user.id, caption_scale=sizes[arg])
     await m.reply(f"✅ Caption size: `{arg}`")
+
+
+@app.on_message(filters.command("megalogin") & filters.private)
+async def _megalogin(_, m: Message):
+    if not _allowed(m.from_user.id):
+        return
+    if len(m.command) < 3:
+        return await m.reply("Usage: `/megalogin your@email.com yourpassword`\n"
+                             "Then videos over 2GB are uploaded to MEGA and I send you the link.")
+    email = m.command[1]
+    pw = m.text.split(None, 2)[2]
+    await m.reply("⏳ Connecting to MEGA…")
+    ok, msg = await asyncio.to_thread(delivery.mega_configure, email, pw)
+    await m.reply("✅ MEGA connected. Big videos (2GB+) will be sent as a MEGA link."
+                  if ok else f"❌ MEGA login failed: `{msg}`")
+
+
+@app.on_message(filters.command("loginpremium") & filters.private)
+async def _loginpremium(_, m: Message):
+    if not _allowed(m.from_user.id):
+        return
+    _login[m.from_user.id] = {"step": "phone"}
+    await m.reply("🔐 **Premium account login** (for up to 4GB uploads).\n\n"
+                  "Send your phone number with country code, e.g. `+252612345678`.\n"
+                  "(Send /cancel to stop.)")
+
+
+@app.on_message(filters.command("cancel") & filters.private)
+async def _cancel(_, m: Message):
+    st = _login.pop(m.from_user.id, None)
+    if st and st.get("client"):
+        try:
+            await st["client"].disconnect()
+        except Exception:
+            pass
+    await m.reply("✖️ Cancelled." if st else "Nothing to cancel.")
+
+
+@app.on_message(filters.command("logoutpremium") & filters.private)
+async def _logoutpremium(_, m: Message):
+    if not _allowed(m.from_user.id):
+        return
+    try:
+        os.remove(PREMIUM_SESSION_FILE)
+    except OSError:
+        pass
+    await m.reply("✅ Premium account removed.")
+
+
+@app.on_message(filters.text & filters.private & ~filters.regex(r"^/"))
+async def _login_text(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid) or uid not in _login:
+        return
+    st = _login[uid]
+    try:
+        if st["step"] == "phone":
+            phone = m.text.strip().replace(" ", "")
+            cli = Client("premium_login", api_id=settings.api_id,
+                         api_hash=settings.api_hash, in_memory=True, no_updates=True)
+            await cli.connect()
+            sent = await cli.send_code(phone)
+            st.update(step="otp", client=cli, phone=phone, hash=sent.phone_code_hash)
+            await m.reply("📲 A code was sent to your Telegram. Send it **with spaces** "
+                          "so Telegram doesn't block it, e.g. `1 2 3 4 5`.")
+        elif st["step"] == "otp":
+            code = m.text.replace(" ", "").strip()
+            cli = st["client"]
+            try:
+                await cli.sign_in(st["phone"], st["hash"], code)
+            except SessionPasswordNeeded:
+                st["step"] = "2fa"
+                return await m.reply("🔒 Your account has 2FA. Send your password.")
+            sess = await cli.export_session_string()
+            with open(PREMIUM_SESSION_FILE, "w") as f:
+                f.write(sess)
+            await cli.disconnect()
+            _login.pop(uid, None)
+            await m.reply("✅ Premium account connected — videos up to **4GB** are now "
+                          "delivered straight to your Saved Messages.")
+        elif st["step"] == "2fa":
+            cli = st["client"]
+            await cli.check_password(m.text.strip())
+            sess = await cli.export_session_string()
+            with open(PREMIUM_SESSION_FILE, "w") as f:
+                f.write(sess)
+            await cli.disconnect()
+            _login.pop(uid, None)
+            await m.reply("✅ Premium account connected — up to **4GB** uploads.")
+    except Exception as e:
+        await m.reply(f"❌ Login error: `{str(e)[:200]}`\nTry /loginpremium again.")
+        st2 = _login.pop(uid, None)
+        if st2 and st2.get("client"):
+            try:
+                await st2["client"].disconnect()
+            except Exception:
+                pass
 
 
 @app.on_message(filters.command("at") & filters.private)
@@ -548,15 +686,33 @@ async def _do_render(cq: CallbackQuery, uid: int, job: dict):
 
             ow, oh, odur = await asyncio.to_thread(probe, out)
             sz = os.path.getsize(out)
-            await status.edit(f"⬆️ Uploading… ({human_size(sz)})")
-            if sz > 2 * 1024 ** 3:
+            cap = f"✅ Branded — {len(events)} banner(s) covered • {human_size(sz)}"
+            name = f"branded_{os.path.basename(job['name'])}"
+
+            if sz <= TG_LIMIT:
+                # fits Telegram's 2GB bot limit -> send normally
+                await status.edit(f"⬆️ Uploading… ({human_size(sz)})")
+                await job["msg"].reply_video(
+                    out, duration=int(odur), width=ow, height=oh,
+                    supports_streaming=True, caption=cap)
+            elif _premium_session() and sz <= PREMIUM_LIMIT:
+                # use the owner's premium account (up to 4GB) -> Saved Messages
+                await status.edit(f"⬆️ {human_size(sz)} — uploading via your premium "
+                                  f"account (up to 4GB)…")
+                await _premium_send(out, cap, int(odur), ow, oh)
                 await job["msg"].reply(
-                    f"⚠️ File is {human_size(sz)} — over Telegram's 2GB limit. "
-                    f"Lower the bitrate / target size and render again.")
-            await job["msg"].reply_video(
-                out, duration=int(odur), width=ow, height=oh,
-                supports_streaming=True,
-                caption=f"✅ Branded — {len(events)} banner(s) covered • {human_size(sz)}")
+                    f"{cap}\n📥 Too big for the bot — sent to your **Saved Messages** "
+                    f"via your premium account.")
+            elif delivery.mega_is_configured():
+                await status.edit(f"☁️ {human_size(sz)} — uploading to MEGA…")
+                link = await asyncio.to_thread(delivery.mega_upload, out, name)
+                await job["msg"].reply(f"{cap}\n📥 Too big for Telegram — **MEGA link:**\n{link}")
+            else:
+                await job["msg"].reply(
+                    f"⚠️ Output is {human_size(sz)} — over Telegram's 2GB bot limit.\n"
+                    f"Options:\n• `/loginpremium` to send up to 4GB via your account\n"
+                    f"• `/megalogin email pass` to get a MEGA link\n"
+                    f"• or lower the bitrate / set Target size 1.9GB and re-render")
             await status.delete()
         except Exception as e:
             log.exception("render failed")

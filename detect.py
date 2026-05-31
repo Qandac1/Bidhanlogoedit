@@ -231,12 +231,14 @@ def _find_template_banners(gray: np.ndarray) -> list[tuple[float, float, float, 
             _mn, mv, _ml, ml = cv2.minMaxLoc(res)
             if best is None or mv > best[0]:
                 best = (mv, ml, tw, th)
-        if best and best[0] >= 0.62:
+        if best and best[0] >= 0.72:
             _, (lx, ly), tw, th = best
-            nx = lx / W
+            # template is the "Fanproj CHANNELS" red LOGO (left of the strip);
+            # extend right to cover the whole strip (icons + set-top-box)
+            nx = max(0.0, lx / W - 0.01)
             ny = (ly + y0) / H
-            nw = min(1.0 - nx, (tw / W) * 1.7)   # extend to full banner width
-            nh = th / H
+            nw = min(1.0 - nx, (tw / W) * 3.2)
+            nh = (th / H) * 1.25
             out.append((nx, ny, nw, nh))
     return out
 
