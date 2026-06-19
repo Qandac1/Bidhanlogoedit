@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     fonts-dejavu-core \
     ca-certificates \
+    megatools \
     curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
