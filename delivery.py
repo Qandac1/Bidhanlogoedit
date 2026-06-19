@@ -40,6 +40,11 @@ def mega_configure(email: str, password: str) -> tuple[bool, str]:
     # verify the login works
     chk = _rclone("lsd", f"{REMOTE}:", timeout=120)
     if chk.returncode != 0:
+        # DON'T leave a poisoned remote behind: a remote with bad creds makes
+        # mega_is_configured() return True, so later uploads fail with the
+        # confusing "rclone exit 1". Remove it so the bot stays cleanly "not set
+        # up" until a valid login succeeds.
+        _rclone("config", "delete", REMOTE)
         return False, "login failed: " + (chk.stderr or chk.stdout)[-200:]
     return True, "ok"
 

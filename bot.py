@@ -44,11 +44,19 @@ PREMIUM_SESSION_FILE = os.path.join(DATA_DIR, "premium_session.txt")
 TG_LIMIT = int(1.95 * 1024 ** 3)          # ~2 GB Telegram bot cap
 PREMIUM_LIMIT = int(3.9 * 1024 ** 3)      # ~4 GB Telegram premium cap
 os.environ.setdefault("RCLONE_CONFIG", delivery.RCLONE_CONF)
-_render_lock = asyncio.Lock()
+# Concurrency: up to MAX_RENDERS jobs render AT THE SAME TIME, so different
+# users' videos process simultaneously instead of waiting in one line. The VPS
+# cpu_shares/cpus caps keep the box (and the other bots) safe under load.
+_render_sem = asyncio.Semaphore(int(os.environ.get("MAX_RENDERS", "3")))
 _pending: dict[int, dict] = {}            # uid -> active job (probe + src path)
 _login: dict[int, dict] = {}              # uid -> premium-login flow state
-# the in-flight download/render so /cancel can stop it: {uid, proc, cancelled, phase}
-_active: dict = {"uid": None, "proc": None, "cancelled": False, "phase": ""}
+# PER-UID in-flight download/render so concurrent jobs don't clobber each other
+# and /cancel can stop the right one: uid -> {proc, cancelled, phase}
+_active: dict[int, dict] = {}
+
+
+def _act(uid: int) -> dict:
+    return _active.setdefault(uid, {"proc": None, "cancelled": False, "phase": ""})
 # ---- batch queue: send many files at once -> processed one-by-one ----
 _queue: dict[int, list] = {}              # uid -> incoming msgs being collected
 _qtimer: dict[int, asyncio.Task] = {}     # uid -> debounce task
@@ -610,11 +618,12 @@ async def _cancel(_, m: Message):
         _batch_panel.pop(uid, None)
         done.append("🛑 batch stopped" + (f" ({n} queued cleared)" if n else ""))
     # 1) a running download or render -> kill its process
-    if _active.get("uid") == uid and _active.get("proc"):
-        _active["cancelled"] = True
+    a = _active.get(uid)
+    if a and a.get("proc"):
+        a["cancelled"] = True
         try:
-            _active["proc"].kill()
-            done.append(f"🛑 {_active.get('phase') or 'job'} cancelled")
+            a["proc"].kill()
+            done.append(f"🛑 {a.get('phase') or 'job'} cancelled")
         except Exception:
             pass
     # 2) a pending job waiting in the panel (not started yet)
@@ -838,7 +847,7 @@ async def _intake_single(uid: int, m: Message) -> None:
         job = await _build_job(uid, m, status)
     except Exception as e:
         _pending.pop(uid, None)
-        if _active.get("cancelled"):
+        if _active.get(uid, {}).get("cancelled"):
             await status.edit("🛑 Download cancelled.")
         else:
             log.exception("download/probe failed")
@@ -901,30 +910,29 @@ async def _run_batch(uid: int) -> None:
     total = len(msgs)
     done = 0
     head = await msgs[0].reply(f"📦 **Batch started** — 0/{total} done.")
-    async with _render_lock:
-        for i, m in enumerate(msgs, 1):
-            if _batch_cancel.get(uid):
-                break
-            status = await m.reply(f"📦 **{i}/{total}** — preparing…")
-            try:
-                job = await _build_job(uid, m, status)
-                await _render_job(uid, job, status)
-                if not _batch_cancel.get(uid):
-                    done += 1
-            except Exception as e:
-                if _active.get("cancelled") or _batch_cancel.get(uid):
-                    pass
-                else:
-                    log.exception("batch item failed")
-                    try:
-                        await status.edit(f"❌ {i}/{total} failed: `{str(e)[:200]}`")
-                    except Exception:
-                        pass
-            try:
-                tail = " — stopping…" if _batch_cancel.get(uid) else "…"
-                await head.edit(f"📦 **Batch** — {done}/{total} done{tail}")
-            except Exception:
+    for i, m in enumerate(msgs, 1):
+        if _batch_cancel.get(uid):
+            break
+        status = await m.reply(f"📦 **{i}/{total}** — preparing…")
+        try:
+            job = await _build_job(uid, m, status)
+            await _render_job(uid, job, status)
+            if not _batch_cancel.get(uid):
+                done += 1
+        except Exception as e:
+            if _act(uid).get("cancelled") or _batch_cancel.get(uid):
                 pass
+            else:
+                log.exception("batch item failed")
+                try:
+                    await status.edit(f"❌ {i}/{total} failed: `{str(e)[:200]}`")
+                except Exception:
+                    pass
+        try:
+            tail = " — stopping…" if _batch_cancel.get(uid) else "…"
+            await head.edit(f"📦 **Batch** — {done}/{total} done{tail}")
+        except Exception:
+            pass
     final = (f"🛑 Batch stopped — {done}/{total} done."
              if _batch_cancel.get(uid) else f"✅ **Batch finished** — {done}/{total} branded.")
     try:
@@ -1089,13 +1097,13 @@ async def _build_job(uid: int, m: Message, status: Message) -> dict:
             if dlt.ok(pct):
                 asyncio.run_coroutine_threadsafe(
                     status.edit(f"⬇️ **Downloading from MEGA** (fast)\n`{_bar(pct)}`"), loop)
-        _active.update(uid=uid, proc=None, cancelled=False, phase="Download")
+        _act(uid).update(proc=None, cancelled=False, phase="Download")
         try:
             path, name = await asyncio.to_thread(
                 delivery.mega_download, mo.group(0), dest, _cb,
-                lambda p: _active.__setitem__("proc", p))
+                lambda p: _act(uid).__setitem__("proc", p))
         finally:
-            _active.update(uid=None, proc=None, cancelled=False, phase="")
+            _act(uid).update(proc=None, phase="")
     else:
         dlt = _Throttle()
 
@@ -1116,18 +1124,19 @@ async def _build_job(uid: int, m: Message, status: Message) -> dict:
 
 # ----------------------------------------------------------------- render
 async def _do_render(cq: CallbackQuery, uid: int, job: dict):
-    if _render_lock.locked():
-        await cq.message.edit("⏳ Another render is running — try again when it's done.")
-        return
-    async with _render_lock:
-        await _render_job(uid, job, cq.message)
+    await _render_job(uid, job, cq.message)
 
 
 async def _render_job(uid: int, job: dict, status: Message):
-    """Scan + render + deliver ONE job, editing `status` for progress and
-    replying to `job['msg']` with the result. Caller holds _render_lock. Used by
-    both the single-file panel and the batch queue."""
-    if True:
+    """Scan + render + deliver ONE job. Up to MAX_RENDERS of these run at once
+    (a semaphore), so different users' videos process simultaneously instead of
+    waiting in a single line. Each job holds one slot for its scan+render."""
+    if _render_sem.locked():
+        try:
+            await status.edit("⏳ In queue — other renders are running; yours starts shortly…")
+        except Exception:
+            pass
+    async with _render_sem:
         c = user_cfg(uid)
         src, work, dur = job["src"], job["work"], job["duration"]
         try:
@@ -1201,12 +1210,12 @@ async def _render_job(uid: int, job: dict, status: Message):
                             pass
 
             pt = asyncio.create_task(poller())
-            _active.update(uid=uid, proc=None, cancelled=False, phase="Render")
+            _act(uid).update(proc=None, cancelled=False, phase="Render")
             try:
                 await asyncio.to_thread(
                     render, src, out, events, cfg,
                     lambda p: prog.__setitem__("pct", p),
-                    lambda p: _active.__setitem__("proc", p))
+                    lambda p: _act(uid).__setitem__("proc", p))
             finally:
                 pt.cancel()
 
@@ -1257,7 +1266,7 @@ async def _render_job(uid: int, job: dict, status: Message):
                     f"• or lower the bitrate / set Target size 1.9GB and re-render")
             await status.delete()
         except Exception as e:
-            if _active.get("cancelled"):
+            if _act(uid).get("cancelled"):
                 try:
                     await status.edit("🛑 Render cancelled.")
                 except Exception:
@@ -1266,7 +1275,7 @@ async def _render_job(uid: int, job: dict, status: Message):
                 log.exception("render failed")
                 await status.edit(f"❌ Failed: `{str(e)[:300]}`")
         finally:
-            _active.update(uid=None, proc=None, cancelled=False, phase="")
+            _active.pop(uid, None)
             _pending.pop(uid, None)
             try:
                 for root, _d, files in os.walk(work, topdown=False):
