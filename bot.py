@@ -14,6 +14,7 @@ import os
 import re
 import json
 import time
+import shutil
 import asyncio
 import logging
 
@@ -57,6 +58,42 @@ _active: dict[int, dict] = {}
 
 def _act(uid: int) -> dict:
     return _active.setdefault(uid, {"proc": None, "cancelled": False, "phase": ""})
+
+
+# ---- OUTBOX: finished files are kept here so a delivery failure (MEGA full,
+# over 2GB with no method, etc.) never loses the render. /deliver re-sends them.
+OUTBOX = os.path.join(DATA_DIR, "outbox")
+PENDING_FILE = os.path.join(DATA_DIR, "pending.json")
+
+
+def _load_pending() -> dict:
+    try:
+        with open(PENDING_FILE) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_pending(d: dict) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(PENDING_FILE, "w") as f:
+        json.dump(d, f, indent=2)
+
+
+def _add_pending(uid: int, entry: dict) -> None:
+    d = _load_pending()
+    d.setdefault(str(uid), []).append(entry)
+    _save_pending(d)
+
+
+def _remove_pending(uid: int, path: str) -> None:
+    d = _load_pending()
+    lst = [e for e in d.get(str(uid), []) if e.get("path") != path]
+    if lst:
+        d[str(uid)] = lst
+    else:
+        d.pop(str(uid), None)
+    _save_pending(d)
 # ---- batch queue: send many files at once -> processed one-by-one ----
 _queue: dict[int, list] = {}              # uid -> incoming msgs being collected
 _qtimer: dict[int, asyncio.Task] = {}     # uid -> debounce task
@@ -436,7 +473,10 @@ HELP = (
     "brands them **one-by-one automatically**. `/cancel` stops the batch.\n\n"
     "**Big files (2GB+)**\n"
     "/loginpremium — connect your premium account → send up to 4GB\n"
-    "/megalogin `email pass` — send 2GB+ videos as a MEGA link\n\n"
+    "/megalogin `email pass` — send 2GB+ videos as a MEGA link\n"
+    "💾 If delivery fails (MEGA full etc.) the finished file is **kept on the "
+    "server** — `/files` to see them, `/deliver` to send them once you've freed "
+    "space. No re-rendering.\n\n"
     "👤 `/myid` — show your Telegram ID (to request access)\n"
     "👑 **Owner only:** `/allow <id>` · `/deny <id>` · `/users` — manage who can "
     "use the bot.\n"
@@ -690,6 +730,46 @@ async def _list_users(_, m: Message):
     await m.reply(f"👥 **Authorized users** (plus you, the owner `{settings.owner_id}`):\n"
                   f"{lst}\n\n`/allow <id>` add · `/deny <id>` remove\n"
                   "Tell a new user to send `/myid` to get their ID.")
+
+
+@app.on_message(filters.command(["files", "pending", "outbox"]) & filters.private)
+async def _files_cmd(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid):
+        return
+    lst = [e for e in _load_pending().get(str(uid), []) if os.path.exists(e.get("path", ""))]
+    if not lst:
+        return await m.reply("✅ No files waiting — everything's been delivered.")
+    total = sum(e.get("size", 0) for e in lst)
+    body = "\n".join(f"• {e['name']} — {human_size(e.get('size', 0))}" for e in lst)
+    await m.reply(f"💾 **{len(lst)} file(s) saved on the server** ({human_size(total)} total):\n"
+                  f"{body}\n\nSend /deliver to send them (after freeing MEGA or /loginpremium).")
+
+
+@app.on_message(filters.command(["deliver", "getfiles", "resend"]) & filters.private)
+async def _deliver_cmd(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid):
+        return
+    lst = [e for e in _load_pending().get(str(uid), []) if os.path.exists(e.get("path", ""))]
+    if not lst:
+        return await m.reply("No files waiting to deliver.")
+    await m.reply(f"📤 Delivering {len(lst)} saved file(s)…")
+    for e in lst:
+        status = await m.reply(f"📦 {e['name']} ({human_size(e.get('size', 0))})…")
+        if await _deliver_file(uid, e, status, m):
+            _remove_pending(uid, e["path"])
+            try:
+                os.remove(e["path"])
+            except OSError:
+                pass
+            try:
+                await status.delete()
+            except Exception:
+                pass
+    left = len([e for e in _load_pending().get(str(uid), []) if os.path.exists(e.get("path", ""))])
+    await m.reply("✅ All delivered." if left == 0
+                  else f"⚠️ {left} still couldn't send — free MEGA space or /loginpremium, then /deliver again.")
 
 
 @app.on_message(filters.command("logoutpremium") & filters.private)
@@ -1123,6 +1203,62 @@ async def _build_job(uid: int, m: Message, status: Message) -> dict:
 
 
 # ----------------------------------------------------------------- render
+async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Message) -> bool:
+    """Send one finished file (Telegram / premium / MEGA). Returns True on
+    success. On failure it leaves the file in the outbox so it can be retried."""
+    out = entry["path"]
+    if not os.path.exists(out):
+        _remove_pending(uid, out)
+        try:
+            await status.edit("⚠️ That file is no longer on the server.")
+        except Exception:
+            pass
+        return False
+    sz = os.path.getsize(out)
+    cap, name = entry["cap"], entry["name"]
+    ow, oh, odur = int(entry.get("w", 0)), int(entry.get("h", 0)), entry.get("dur", 0)
+    try:
+        if sz <= TG_LIMIT:
+            ult = _Throttle()
+
+            async def _ulp(cur, tot):
+                if tot and ult.ok(cur / tot * 100):
+                    try:
+                        await status.edit(f"⬆️ **Uploading to Telegram**\n`{_bar(cur / tot * 100)}`")
+                    except Exception:
+                        pass
+            await status.edit(f"⬆️ Uploading… ({human_size(sz)})")
+            await reply_to.reply_video(out, duration=int(odur), width=ow, height=oh,
+                                       supports_streaming=True, caption=cap, progress=_ulp)
+            return True
+        elif _premium_session() and sz <= PREMIUM_LIMIT:
+            await status.edit(f"⬆️ {human_size(sz)} — uploading via your premium account…")
+            await _premium_send(out, cap, int(odur), ow, oh)
+            await reply_to.reply(f"{cap}\n📥 Sent to your **Saved Messages** (premium account).")
+            return True
+        elif delivery.mega_is_configured():
+            await status.edit(f"☁️ {human_size(sz)} — uploading to MEGA…")
+            loop = asyncio.get_event_loop()
+            megt = _Throttle(min_sec=3.0)
+
+            def _mcb(pct):
+                if megt.ok(pct):
+                    asyncio.run_coroutine_threadsafe(
+                        status.edit(f"☁️ **Uploading to MEGA**\n`{_bar(pct)}`"), loop)
+            link = await asyncio.to_thread(delivery.mega_upload, out, name, _mcb)
+            await reply_to.reply(f"{cap}\n📥 Too big for Telegram — **MEGA link:**\n{link}")
+            return True
+        else:
+            return False    # no delivery method available right now
+    except Exception as e:
+        log.exception("delivery failed")
+        try:
+            await status.edit(f"⚠️ Delivery failed: `{str(e)[:200]}`")
+        except Exception:
+            pass
+        return False
+
+
 async def _do_render(cq: CallbackQuery, uid: int, job: dict):
     await _render_job(uid, job, cq.message)
 
@@ -1224,47 +1360,30 @@ async def _render_job(uid: int, job: dict, status: Message):
             cap = f"✅ Branded — {len(events)} banner(s) covered • {human_size(sz)}"
             name = f"branded_{os.path.basename(job['name'])}"
 
-            if sz <= TG_LIMIT:
-                # fits Telegram's 2GB bot limit -> send normally
-                ult = _Throttle()
+            # PRESERVE the finished file in a persistent outbox BEFORE trying to
+            # deliver it — so it's NEVER lost if delivery fails (MEGA full, over
+            # 2GB with no method set up, a crash, etc.). The user can free space /
+            # set up delivery and run /deliver to get it, with no re-render.
+            os.makedirs(OUTBOX, exist_ok=True)
+            saved = os.path.join(OUTBOX, f"{int(time.time())}_{uid}_{name}")
+            await asyncio.to_thread(shutil.move, out, saved)
+            entry = {"path": saved, "name": name, "cap": cap, "w": ow, "h": oh,
+                     "dur": odur, "size": sz, "ts": time.time()}
+            _add_pending(uid, entry)
 
-                async def _ul_progress(cur, tot):
-                    if tot and ult.ok(cur / tot * 100):
-                        try:
-                            await status.edit(f"⬆️ **Uploading to Telegram**\n"
-                                              f"`{_bar(cur / tot * 100)}`")
-                        except Exception:
-                            pass
-                await status.edit(f"⬆️ Uploading… ({human_size(sz)})")
-                await job["msg"].reply_video(
-                    out, duration=int(odur), width=ow, height=oh,
-                    supports_streaming=True, caption=cap, progress=_ul_progress)
-            elif _premium_session() and sz <= PREMIUM_LIMIT:
-                # use the owner's premium account (up to 4GB) -> Saved Messages
-                await status.edit(f"⬆️ {human_size(sz)} — uploading via your premium "
-                                  f"account (up to 4GB)…")
-                await _premium_send(out, cap, int(odur), ow, oh)
-                await job["msg"].reply(
-                    f"{cap}\n📥 Too big for the bot — sent to your **Saved Messages** "
-                    f"via your premium account.")
-            elif delivery.mega_is_configured():
-                await status.edit(f"☁️ {human_size(sz)} — uploading to MEGA…")
-                loop = asyncio.get_event_loop()
-                megt = _Throttle(min_sec=3.0)
-
-                def _mega_cb(pct):
-                    if megt.ok(pct):
-                        asyncio.run_coroutine_threadsafe(
-                            status.edit(f"☁️ **Uploading to MEGA**\n`{_bar(pct)}`"), loop)
-                link = await asyncio.to_thread(delivery.mega_upload, out, name, _mega_cb)
-                await job["msg"].reply(f"{cap}\n📥 Too big for Telegram — **MEGA link:**\n{link}")
+            if await _deliver_file(uid, entry, status, job["msg"]):
+                _remove_pending(uid, saved)
+                try:
+                    os.remove(saved)
+                except OSError:
+                    pass
+                await status.delete()
             else:
-                await job["msg"].reply(
-                    f"⚠️ Output is {human_size(sz)} — over Telegram's 2GB bot limit.\n"
-                    f"Options:\n• `/loginpremium` to send up to 4GB via your account\n"
-                    f"• `/megalogin email pass` to get a MEGA link\n"
-                    f"• or lower the bitrate / set Target size 1.9GB and re-render")
-            await status.delete()
+                await status.edit(
+                    f"💾 **Saved on the server** ({human_size(sz)}) — your file is NOT "
+                    f"lost.\nCouldn't deliver now (over 2GB / MEGA full / no delivery set "
+                    f"up). Free MEGA space or run /loginpremium, then send **/deliver** to "
+                    f"get it — no re-render needed.  (/files to see what's waiting.)")
         except Exception as e:
             if _act(uid).get("cancelled"):
                 try:
