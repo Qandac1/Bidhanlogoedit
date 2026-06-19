@@ -193,7 +193,8 @@ def build_filter(src_w: int, src_h: int, duration: float,
 # ----------------------------------------------------------------- render
 def render(video: str, out_path: str, events: list[CoverEvent],
            cfg: RenderConfig,
-           progress_cb: Callable[[float], None] | None = None) -> str:
+           progress_cb: Callable[[float], None] | None = None,
+           register: Callable[[object], None] | None = None) -> str:
     src_w, src_h, dur = probe(video)
     # gate cover bars by cover_start (skip the intro): drop banners that end
     # before it, clip the start of any that straddle it.
@@ -236,6 +237,8 @@ def render(video: str, out_path: str, events: list[CoverEvent],
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, bufsize=1)
+    if register:
+        register(proc)   # let the caller hold the process so it can cancel it
     last = -5.0
     assert proc.stdout is not None
     for line in proc.stdout:

@@ -10,15 +10,18 @@ deliver it another way.
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
 
 RCLONE_CONF = "/app/data/rclone.conf"
 REMOTE = "megabidhaan"
 FOLDER = "BidhaanLogoEdit"
+RCLONE = shutil.which("rclone") or "/usr/local/bin/rclone"
 
 
 def _rclone(*args: str, timeout: int = 36000) -> subprocess.CompletedProcess:
-    return subprocess.run(["rclone", "--config", RCLONE_CONF, *args],
+    return subprocess.run([RCLONE, "--config", RCLONE_CONF, *args],
                           capture_output=True, text=True, timeout=timeout)
 
 
@@ -48,13 +51,66 @@ def mega_is_configured() -> bool:
     return f"{REMOTE}:" in (r.stdout or "")
 
 
-def mega_upload(path: str, name: str | None = None) -> str:
-    """Upload a file to MEGA and return a public download link."""
+def mega_download(link: str, dest: str, progress_cb=None, register=None) -> tuple[str, str]:
+    """Download a MEGA public link straight to the server with megatools (megadl)
+    — full bandwidth (~200+ MB/s), far faster than pulling the file through
+    Telegram. Saves to `dest`; returns (path, original_filename).
+
+    progress_cb(pct 0..100) is called as it downloads (parsed from megadl).
+    register(proc) is called with the process so the caller can cancel it."""
+    proc = subprocess.Popen(
+        ["megadl", "--path", dest, link],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    if register:
+        register(proc)
+    assert proc.stdout is not None
+    name = None
+    for line in proc.stdout:
+        # lines look like: "Movie.mp4: 10.93% - 243 MiB of 2.2 GiB (242 MiB/s)"
+        if name is None and ": " in line and "%" in line:
+            name = line.split(": ", 1)[0].strip()
+        mo = re.search(r"(\d+(?:\.\d+)?)%", line)
+        if mo and progress_cb:
+            try:
+                progress_cb(float(mo.group(1)))
+            except Exception:
+                pass
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError("MEGA download failed (megadl exit %d)" % proc.returncode)
+    if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+        raise RuntimeError("MEGA download produced no file")
+    return dest, (name or os.path.basename(dest))
+
+
+def mega_upload(path: str, name: str | None = None, progress_cb=None) -> str:
+    """Upload a file to MEGA and return a public download link.
+
+    If progress_cb is given, it's called with a 0..100 float as the upload
+    proceeds (parsed from rclone's live progress output)."""
+    import re
     name = name or os.path.basename(path)
     dest = f"{REMOTE}:{FOLDER}/{name}"
-    up = _rclone("copyto", path, dest)
-    if up.returncode != 0:
-        raise RuntimeError("MEGA upload failed: " + (up.stderr or up.stdout)[-300:])
+    if progress_cb is None:
+        up = _rclone("copyto", path, dest)
+        if up.returncode != 0:
+            raise RuntimeError("MEGA upload failed: " + (up.stderr or up.stdout)[-300:])
+    else:
+        proc = subprocess.Popen(
+            [RCLONE, "--config", RCLONE_CONF, "copyto", path, dest,
+             "-P", "--stats", "2s", "--stats-one-line"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            mobj = re.search(r"(\d+)%", line)
+            if mobj:
+                try:
+                    progress_cb(float(mobj.group(1)))
+                except Exception:
+                    pass
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError("MEGA upload failed (rclone exit %d)" % proc.returncode)
     link = _rclone("link", dest, timeout=300)
     if link.returncode != 0:
         raise RuntimeError("MEGA link failed: " + (link.stderr or link.stdout)[-300:])
