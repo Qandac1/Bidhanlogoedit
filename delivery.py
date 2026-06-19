@@ -94,19 +94,31 @@ def mega_upload(path: str, name: str | None = None, progress_cb=None) -> str:
     If progress_cb is given, it's called with a 0..100 float as the upload
     proceeds (parsed from rclone's live progress output)."""
     import re
+
+    def _friendly(text: str) -> str:
+        # surface the common, actionable cause instead of "rclone exit 1"
+        if "over quota" in text.lower() or "quota" in text.lower():
+            return ("your MEGA account is OUT OF SPACE / over quota — free up "
+                    "storage in MEGA (or wait for the transfer limit to reset), "
+                    "or use /loginpremium to send up to 4GB via your own account")
+        return (text or "unknown error").strip()[-300:]
+
     name = name or os.path.basename(path)
     dest = f"{REMOTE}:{FOLDER}/{name}"
     if progress_cb is None:
         up = _rclone("copyto", path, dest)
         if up.returncode != 0:
-            raise RuntimeError("MEGA upload failed: " + (up.stderr or up.stdout)[-300:])
+            raise RuntimeError("MEGA upload failed: " + _friendly(up.stderr or up.stdout))
     else:
         proc = subprocess.Popen(
             [RCLONE, "--config", RCLONE_CONF, "copyto", path, dest,
              "-P", "--stats", "2s", "--stats-one-line"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         assert proc.stdout is not None
+        tail = []
         for line in proc.stdout:
+            tail.append(line)
+            del tail[:-25]                       # keep only the last lines
             mobj = re.search(r"(\d+)%", line)
             if mobj:
                 try:
@@ -115,7 +127,7 @@ def mega_upload(path: str, name: str | None = None, progress_cb=None) -> str:
                     pass
         proc.wait()
         if proc.returncode != 0:
-            raise RuntimeError("MEGA upload failed (rclone exit %d)" % proc.returncode)
+            raise RuntimeError("MEGA upload failed: " + _friendly("".join(tail)))
     link = _rclone("link", dest, timeout=300)
     if link.returncode != 0:
         raise RuntimeError("MEGA link failed: " + (link.stderr or link.stdout)[-300:])
