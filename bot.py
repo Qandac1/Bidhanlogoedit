@@ -500,7 +500,7 @@ async def _settings(_, m: Message):
                   json.dumps({k: c[k] for k in (
                       "scroll_text", "scroll_seconds", "scroll_count", "width",
                       "height", "fps", "bitrate", "size_target_gb",
-                      "streamnxt_corner", "bidhaan_corner", "logo_frac",
+                      "streamnxt_corner", "bidhaan_corner", "logo_scale",
                       "cover_mode")}, indent=2) + "\n```")
 
 
