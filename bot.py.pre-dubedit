@@ -1223,45 +1223,14 @@ def _dub_panel_text(uid: int) -> str:
 
 
 def _dub_panel_kb(uid: int) -> IKM:
-    """Same edit controls as the branding panel — they all edit user settings,
-    so they apply to a dub render exactly as they do to a branding one.
-    Cover is omitted: a clean HD master has no broadcaster banner to hide."""
     sel = _dubsel.get(uid) or {}
     brand_on = sel.get("brand", True)
-    rows = [
-        [IKB("⏱ Scroll time", "m:scroll"), IKB("🔁 Times", "m:times")],
-        [IKB("📐 Bitrate", "m:br"), IKB("🎯 Target size", "m:size")],
-        [IKB("🖼 Resolution", "m:res"), IKB("🎞 FPS", "m:fps")],
-        [IKB("🏷 Logo positions", "m:logos")],
-        [IKB("▶️ Start times (skip intro)", "m:starts")],
+    return IKM([
+        [IKB("▶️  Start dub-sync", "dub:start")],
         [IKB("🔄 Swap HD ⇄ Dub", "dub:swap"),
          IKB(("🏷 Branding: ON" if brand_on else "🏷 Branding: OFF"), "dub:brand")],
-        [IKB("✅ Start dub-sync", "dub:start"), IKB("❌ Cancel", "dub:cancel")],
-    ]
-    return IKM(rows)
-
-
-def _dub_job_stub(uid: int) -> dict | None:
-    """A job-shaped dict for the shared settings UI.
-
-    `submenu()` never reads it; `panel()` only wants name/duration/w/h. Built
-    from Telegram metadata so no download is needed to open a submenu.
-    """
-    sel = _dubsel.get(uid)
-    if not sel or len(sel.get("msgs") or []) != 2:
-        return None
-    name, w, h, dur = _vmeta(sel["msgs"][sel.get("hd_i", 0)])
-    return {"name": name, "w": w or 1280, "h": h or 720,
-            "duration": dur or 0.0, "src": "", "work": "", "msg": sel["msgs"][0]}
-
-
-async def _refresh_active_panel(cq, uid: int, job: dict) -> None:
-    """Redraw whichever panel is open — dub or branding."""
-    if _dubsel.get(uid):
-        await cq.message.edit(_dub_panel_text(uid), reply_markup=_dub_panel_kb(uid))
-    else:
-        text, kb = panel(uid, job)
-        await cq.message.edit(text, reply_markup=kb)
+        [IKB("❌ Cancel", "dub:cancel")],
+    ])
 
 
 async def _refresh_dub_panel(uid: int) -> None:
@@ -1468,15 +1437,13 @@ async def _cb(_, cq: CallbackQuery):
         asyncio.create_task(_run_batch(uid))
         return
 
-    if job is None and _dubsel.get(uid):
-        # Dub mode has no _pending job, but the shared settings UI expects one.
-        job = _dub_job_stub(uid)
     if job is None:
         return await cq.answer("Session expired — send the video again.", show_alert=True)
 
     # navigation
     if data == "m:main":
-        await _refresh_active_panel(cq, uid, job)
+        text, kb = panel(uid, job)
+        await cq.message.edit(text, reply_markup=kb)
         return await cq.answer()
     if data.startswith("m:"):
         await cq.message.edit_reply_markup(submenu(data[2:], uid, job))
@@ -1505,7 +1472,8 @@ async def _cb(_, cq: CallbackQuery):
             else:
                 w, h = val.split("x")
                 set_user(uid, width=int(w), height=int(h))
-        await _refresh_active_panel(cq, uid, job)
+        text, kb = panel(uid, job)
+        await cq.message.edit(text, reply_markup=kb)
         return await cq.answer("✓")
 
     if data.startswith("lg:"):
