@@ -1209,39 +1209,15 @@ def _dub_panel_text(uid: int) -> str:
         brand_line = "🏷 Branding: **off** — conform only"
     res = "source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
 
-    # ---- what comes out -------------------------------------------------
-    # Output length tracks the DUB (that is the edit being conformed to), less
-    # its own intro/promo, which is only measurable after analysis.
-    out_dur = ddur or hdur or 0.0
-    vk, br_label = _effective_bitrate(c, out_dur) if out_dur else (0, "—")
-    est = estimate_size_bytes(out_dur, vk, c["audio_k"]) if out_dur else 0
-    if est > TG_LIMIT:
-        if _premium_session() and est <= PREMIUM_LIMIT:
-            deliver = "→ sent via your premium account"
-        elif delivery.mega_is_configured():
-            deliver = "→ sent as a MEGA link"
-        else:
-            deliver = "⚠️ over 2GB — set /loginpremium or /megalogin first"
-    else:
-        deliver = "→ sent straight to Telegram"
-    out_res = f"{hw}×{hh}" if c["width"] == 0 and hw else res
-    result = (
-        f"\n🎞 **After editing** _(estimate)_\n"
-        f"     ~{_fmt_hms(out_dur)} · {out_res} · ~{human_size(est)}\n"
-        f"     {deliver}\n"
-    ) if out_dur else ""
-
     return (
         "🎬 **Ready to dub-sync**\n\n"
         + line("📺 **HD master**", hd_n, hw, hh, hdur) + "\n"
         + line("🗣 **Somali dub**", du_n, dw, dh, ddur) + "\n\n"
         + brand_line + "\n"
-        + f"📐 Output: {res} · {br_label}\n"
+        + f"📐 Output: {res} · CRF {settings.x264_crf}\n"
         + _dub_size_warning(msgs)
-        + result
-        + "\n_The dub's own intro and closing promo are removed automatically "
-        "(so the result runs a little shorter); the HD intro is kept with its "
-        "own audio._\n"
+        + "\n_The dub's own intro and closing promo are removed automatically; "
+        "the HD intro is kept with its own audio._\n"
         "⚠️ Wrong way round? Tap **Swap**."
     )
 
