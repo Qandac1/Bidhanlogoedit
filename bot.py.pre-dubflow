@@ -102,7 +102,6 @@ _batch: dict[int, list] = {}              # uid -> msgs confirmed, awaiting "go"
 _batch_panel: dict[int, Message] = {}     # uid -> the batch panel message
 _batch_cancel: dict[int, bool] = {}       # uid -> stop-the-whole-batch flag
 _dubsel: dict[int, dict] = {}             # uid -> pending dub-sync selection
-_dubflow: dict[int, dict] = {}            # uid -> guided dub-sync intake
 _work_seq = 0
 
 
@@ -480,8 +479,6 @@ HELP = (
     "💾 If delivery fails (MEGA full etc.) the finished file is **kept on the "
     "server** — `/files` to see them, `/deliver` to send them once you've freed "
     "space. No re-rendering.\n\n"
-    "🎬 **/dub** — dub-sync: conform an HD master to a Somali dub. The bot asks "
-    "for each file, then brands the result in the same encode.\n\n"
     "👤 `/myid` — show your Telegram ID (to request access)\n"
     "👑 **Owner only:** `/allow <id>` · `/deny <id>` · `/users` — manage who can "
     "use the bot.\n"
@@ -493,10 +490,7 @@ async def _start(_, m: Message):
     if not _allowed(m.from_user.id):
         return await m.reply(f"⛔ This bot is private.\nYour ID is `{m.from_user.id}` — "
                              "send it to the owner to request access.")
-    await m.reply(HELP, reply_markup=IKM([
-        [IKB("🎬 Dub-sync (HD + Somali dub)", "dubflow:begin")],
-        [IKB("⚙️ Settings", "open:settings")],
-    ]))
+    await m.reply(HELP)
 
 
 @app.on_message(filters.command("settings") & filters.private)
@@ -657,9 +651,6 @@ async def _cancel(_, m: Message):
     uid = m.from_user.id
     done = []
     # 0) a batch: stop the whole queue (and the current item below)
-    if _dubflow.pop(uid, None) is not None:
-        done.append("🎬 dub-sync intake cancelled")
-
     if _batch_cancel.get(uid) is not None or _batch.get(uid) or _queue.get(uid):
         _batch_cancel[uid] = True
         tm = _qtimer.pop(uid, None)
@@ -692,14 +683,6 @@ async def _cancel(_, m: Message):
         if not done:
             done.append("✖️ Login cancelled")
     await m.reply("\n".join(done) if done else "Nothing to cancel.")
-
-
-@app.on_message(filters.command(["dub", "dubsync"]) & filters.private)
-async def _dub_cmd(_, m: Message):
-    if not _allowed(m.from_user.id):
-        return await m.reply(f"⛔ This bot is private.\nYour ID is "
-                             f"`{m.from_user.id}` — send it to the owner.")
-    await _dubflow_start(m.from_user.id, m)
 
 
 @app.on_message(filters.command(["myid", "id"]) & filters.private)
@@ -1074,63 +1057,6 @@ def _vmeta(m: Message) -> tuple[str, int, int, float]:
     return name, w, h, dur
 
 
-DUB_ASK_HD = (
-    "🎬 **Dub-sync**\n\n"
-    "Step 1 of 2 — send the **HD master** (the clean high-quality video).\n\n"
-    "_Forward it here, or paste a MEGA link._"
-)
-DUB_ASK_DUB = (
-    "✅ HD received: `{name}`  ·  {res}\n\n"
-    "Step 2 of 2 — now send the **Somali dub** (the StreamNxt/FANPROJ version).\n\n"
-    "_Forward it here, or paste a MEGA link._"
-)
-
-
-def _dubflow_kb() -> IKM:
-    return IKM([[IKB("❌ Cancel", "dubflow:cancel")]])
-
-
-async def _dubflow_start(uid: int, m: Message) -> None:
-    _dubflow[uid] = {"step": "hd", "hd": None, "dub": None}
-    _dubflow[uid]["prompt"] = await m.reply(DUB_ASK_HD, reply_markup=_dubflow_kb())
-
-
-async def _dubflow_take(uid: int, m: Message) -> bool:
-    """Consume a file for the guided flow. True if it was taken."""
-    fl = _dubflow.get(uid)
-    if not fl:
-        return False
-    name, w, h, _d = _vmeta(m)
-    res = f"{w}×{h}" if w and h else "resolution unknown"
-    if fl["step"] == "hd":
-        fl["hd"] = m
-        fl["step"] = "dub"
-        try:
-            await fl["prompt"].edit(DUB_ASK_DUB.format(name=name[:40], res=res),
-                                    reply_markup=_dubflow_kb())
-        except Exception:
-            fl["prompt"] = await m.reply(
-                DUB_ASK_DUB.format(name=name[:40], res=res),
-                reply_markup=_dubflow_kb())
-        return True
-
-    fl["dub"] = m
-    _dubflow.pop(uid, None)
-    msgs = [fl["hd"], fl["dub"]]
-    # The user told us which is which, so trust that ordering rather than
-    # guessing from resolution — Swap on the confirm panel is still there if
-    # they sent them the wrong way round.
-    _dubsel[uid] = {"msgs": msgs, "hd_i": 0, "brand": True, "panel": None}
-    try:
-        panel = await fl["prompt"].edit(_dub_panel_text(uid),
-                                        reply_markup=_dub_panel_kb(uid))
-        _dubsel[uid]["panel"] = panel if hasattr(panel, "edit") else fl["prompt"]
-    except Exception:
-        _dubsel[uid]["panel"] = await m.reply(_dub_panel_text(uid),
-                                              reply_markup=_dub_panel_kb(uid))
-    return True
-
-
 def _dub_size_warning(msgs: list) -> str:
     """Tell the user what a large input means for the wait — not a blocker.
 
@@ -1288,8 +1214,6 @@ async def _on_mega_link(_, m: Message):
         return
     if not re.search(r"https?://mega(?:\.co)?\.nz/\S+", m.text):
         return
-    if await _dubflow_take(uid, m):
-        return
     _enqueue(uid, m)
 
 
@@ -1300,9 +1224,6 @@ async def _on_video(_, m: Message):
         return await m.reply(f"⛔ This bot is private.\nYour ID is `{uid}` — "
                              "send it to the owner to request access.")
     if m.document and not (m.document.mime_type or "").startswith("video"):
-        return
-    # A guided dub-sync takes priority; otherwise behave exactly as before.
-    if await _dubflow_take(uid, m):
         return
     _enqueue(uid, m)
 
@@ -1349,26 +1270,6 @@ async def _cb(_, cq: CallbackQuery):
                                       reply_markup=_dub_panel_kb(uid))
         _dubsel[uid]["panel"] = panel if hasattr(panel, "edit") else cq.message
         return
-
-    if data == "dubflow:begin":
-        await cq.answer()
-        return await _dubflow_start(uid, cq.message)
-
-    if data == "open:settings":
-        await cq.answer()
-        c = user_cfg(uid)
-        try:
-            return await cq.message.reply(
-                "⚙️ **Saved defaults**\n```\n" + _settings_text(uid) + "\n```"
-                if "_settings_text" in globals() else
-                "⚙️ Send /settings to open your settings.")
-        except Exception:
-            return await cq.message.reply("⚙️ Send /settings to open your settings.")
-
-    if data == "dubflow:cancel":
-        _dubflow.pop(uid, None)
-        await cq.message.edit("❌ Dub-sync cancelled.")
-        return await cq.answer()
 
     if data.startswith("dub:"):
         act = data[4:]
