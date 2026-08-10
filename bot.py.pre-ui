@@ -101,7 +101,6 @@ _qtimer: dict[int, asyncio.Task] = {}     # uid -> debounce task
 _batch: dict[int, list] = {}              # uid -> msgs confirmed, awaiting "go"
 _batch_panel: dict[int, Message] = {}     # uid -> the batch panel message
 _batch_cancel: dict[int, bool] = {}       # uid -> stop-the-whole-batch flag
-_dubsel: dict[int, dict] = {}             # uid -> pending dub-sync selection
 _work_seq = 0
 
 
@@ -971,80 +970,6 @@ def _batch_panel_kb(uid: int, n: int) -> IKM:
     return IKM(rows)
 
 
-def _vmeta(m: Message) -> tuple[str, int, int, float]:
-    """Name/size/duration straight from Telegram — no download needed."""
-    v = m.video or m.document
-    name = (getattr(v, "file_name", None) or "video.mp4")
-    w = int(getattr(v, "width", 0) or 0)
-    h = int(getattr(v, "height", 0) or 0)
-    dur = float(getattr(v, "duration", 0) or 0)
-    return name, w, h, dur
-
-
-def _dub_panel_text(uid: int) -> str:
-    sel = _dubsel.get(uid) or {}
-    msgs = sel.get("msgs") or []
-    if len(msgs) != 2:
-        return "🎬 **Dub-sync** — send exactly 2 files."
-    hi = sel.get("hd_i", 0)
-    hd_n, hw, hh, hdur = _vmeta(msgs[hi])
-    du_n, dw, dh, ddur = _vmeta(msgs[1 - hi])
-
-    def line(tag, n, w, h, d):
-        res = f"{w}×{h}" if w and h else "?"
-        dur = f" · {int(d)//60}:{int(d)%60:02d}" if d else ""
-        return f"{tag} `{n[:38]}`\n     {res}{dur}"
-
-    c = get_user(uid)
-    logos = []
-    if c["bidhaan_on"]:
-        logos.append(f"Bidhaan[{c['bidhaan_corner']}]")
-    if c["bidhaan2_on"]:
-        logos.append(f"Bidhaan[{c['bidhaan2_corner']}]")
-    if c["streamnxt_on"]:
-        logos.append(f"StreamNxt[{c['streamnxt_corner']}]")
-    brand_on = sel.get("brand", True)
-    if brand_on and (logos or c["scroll_text"]):
-        bits = ", ".join(logos) or "no logo"
-        cap = " + caption" if c["scroll_text"] else ""
-        brand_line = f"🏷 Branding: {bits}{cap}  _(same encode)_"
-    else:
-        brand_line = "🏷 Branding: **off** — conform only"
-    res = "source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
-
-    return (
-        "🎬 **Ready to dub-sync**\n\n"
-        + line("📺 **HD master**", hd_n, hw, hh, hdur) + "\n"
-        + line("🗣 **Somali dub**", du_n, dw, dh, ddur) + "\n\n"
-        + brand_line + "\n"
-        + f"📐 Output: {res} · CRF {settings.x264_crf}\n\n"
-        "_The dub's own intro and closing promo are removed automatically; "
-        "the HD intro is kept with its own audio._\n"
-        "⚠️ Wrong way round? Tap **Swap**."
-    )
-
-
-def _dub_panel_kb(uid: int) -> IKM:
-    sel = _dubsel.get(uid) or {}
-    brand_on = sel.get("brand", True)
-    return IKM([
-        [IKB("▶️  Start dub-sync", "dub:start")],
-        [IKB("🔄 Swap HD ⇄ Dub", "dub:swap"),
-         IKB(("🏷 Branding: ON" if brand_on else "🏷 Branding: OFF"), "dub:brand")],
-        [IKB("❌ Cancel", "dub:cancel")],
-    ])
-
-
-async def _refresh_dub_panel(uid: int) -> None:
-    sel = _dubsel.get(uid) or {}
-    msg = sel.get("panel")
-    if msg:
-        try:
-            await msg.edit(_dub_panel_text(uid), reply_markup=_dub_panel_kb(uid))
-        except Exception:
-            pass
-
-
 async def _show_batch_panel(uid: int, m: Message) -> None:
     n = len(_batch.get(uid, []))
     _batch_panel[uid] = await m.reply(_batch_panel_text(uid, n),
@@ -1157,49 +1082,13 @@ async def _cb(_, cq: CallbackQuery):
                                    show_alert=True)
         _batch.pop(uid, None)
         _batch_panel.pop(uid, None)
-        # Guess the HD by resolution from Telegram's own metadata — no download
-        # needed to show the user what was picked. Size is NOT used: a 480p dub
-        # can easily be the larger file.
-        a, b = _vmeta(msgs[0]), _vmeta(msgs[1])
-        hd_i = 0 if (a[1] * a[2]) >= (b[1] * b[2]) else 1
-        _dubsel[uid] = {"msgs": msgs, "hd_i": hd_i, "brand": True, "panel": None}
-        await cq.answer()
-        panel = await cq.message.edit(_dub_panel_text(uid),
-                                      reply_markup=_dub_panel_kb(uid))
-        _dubsel[uid]["panel"] = panel if hasattr(panel, "edit") else cq.message
+        await cq.answer("Starting dub-sync…")
+        try:
+            await cq.message.edit("🎬 **Dub-sync starting** — HD + Somali dub")
+        except Exception:
+            pass
+        asyncio.create_task(_run_dubsync(uid, msgs))
         return
-
-    if data.startswith("dub:"):
-        act = data[4:]
-        sel = _dubsel.get(uid)
-        if not sel and act != "cancel":
-            return await cq.answer("Session expired — send the two files again.",
-                                   show_alert=True)
-        if act == "cancel":
-            _dubsel.pop(uid, None)
-            await cq.message.edit("❌ Dub-sync cancelled.")
-            return await cq.answer()
-        if act == "swap":
-            sel["hd_i"] = 1 - sel["hd_i"]
-            await _refresh_dub_panel(uid)
-            return await cq.answer("Swapped.")
-        if act == "brand":
-            sel["brand"] = not sel.get("brand", True)
-            await _refresh_dub_panel(uid)
-            return await cq.answer("Branding " + ("on" if sel["brand"] else "off"))
-        if act == "start":
-            msgs = sel["msgs"]
-            hd_i = sel["hd_i"]
-            brand = sel.get("brand", True)
-            _dubsel.pop(uid, None)
-            await cq.answer("Starting…")
-            try:
-                await cq.message.edit("🎬 **Dub-sync starting…**")
-            except Exception:
-                pass
-            asyncio.create_task(_run_dubsync(uid, msgs, hd_i, brand))
-            return
-        return await cq.answer()
 
     if data == "bgo" or data.startswith("btpl:"):
         if not _batch.get(uid):
@@ -1330,8 +1219,7 @@ def _brand_payload(uid: int) -> dict:
     }
 
 
-async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
-                       brand: bool = True) -> None:
+async def _run_dubsync(uid: int, msgs: list) -> None:
     """Conform an HD master to a Somali dub, branded in the same single pass."""
     import dubsync_job
 
@@ -1343,10 +1231,10 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
             await status.edit(f"⬇️ **Downloading file {i}/2**")
             jobs.append(await _build_job(uid, m, status))
 
-        # The user confirmed (and could correct) the pairing on the panel, so
-        # honour that rather than re-guessing from the downloaded files.
-        hd_job, dub_job = jobs[hd_i], jobs[1 - hd_i]
-        hd_src, dub_src = Path(hd_job["src"]), Path(dub_job["src"])
+        a, b = Path(jobs[0]["src"]), Path(jobs[1]["src"])
+        hd_src, dub_src = await asyncio.to_thread(dubsync_job.identify_pair, a, b)
+        hd_job = jobs[0] if Path(jobs[0]["src"]) == hd_src else jobs[1]
+        dub_job = jobs[1] if hd_job is jobs[0] else jobs[0]
         title = dubsync_job._slug(hd_job["name"])
         await status.edit(
             f"🔎 **Identified**\n"
@@ -1364,14 +1252,12 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         async def on_prog(label: str, pct: float):
             if thr.ok(pct):
                 try:
-                    await status.edit(
-                        f"🎬 **Dub-sync** — `{title}`\n{label}\n`{_bar(pct)}`",
-                        reply_markup=IKM([[IKB("🛑 Cancel", "cancel")]]))
+                    await status.edit(f"{label}\n`{_bar(pct)}`")
                 except Exception:
                     pass
 
         res = await dubsync_job.run_dubsync(
-            hd, dub, title, (_brand_payload(uid) if brand else None),
+            hd, dub, title, _brand_payload(uid),
             width=ow, height=oh, crf=settings.x264_crf,
             on_progress=on_prog)
 
