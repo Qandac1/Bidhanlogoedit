@@ -668,30 +668,15 @@ async def _cancel_everything(uid: int) -> list:
         n = len(_queue.pop(uid, [])) + len(_batch.pop(uid, []))
         _batch_panel.pop(uid, None)
         done.append("🛑 batch stopped" + (f" ({n} queued cleared)" if n else ""))
-    # 1) a running download or render.
-    #    A subprocess (ffmpeg, megadl, the dubsync stages) gets killed. A
-    #    Telegram download has NO subprocess — it is an asyncio task — so the
-    #    task is cancelled too, otherwise the bot reports "cancelled" while the
-    #    download carries happily on, which is exactly what John saw.
+    # 1) a running download or render -> kill its process
     a = _active.get(uid)
-    if a:
+    if a and a.get("proc"):
         a["cancelled"] = True
-        killed = False
-        if a.get("proc"):
-            try:
-                a["proc"].kill()
-                killed = True
-            except Exception:
-                pass
-        task = a.get("task")
-        if task is not None and not task.done():
-            try:
-                task.cancel()
-                killed = True
-            except Exception:
-                pass
-        if killed:
+        try:
+            a["proc"].kill()
             done.append(f"🛑 {a.get('phase') or 'job'} cancelled")
+        except Exception:
+            pass
     # 2) a pending job waiting in the panel (not started yet)
     pend = _pending.pop(uid, None)
     if pend and not done:
@@ -1192,7 +1177,7 @@ def _dub_panel_text(uid: int) -> str:
         dur = f" · {int(d)//60}:{int(d)%60:02d}" if d else ""
         return f"{tag} `{n[:38]}`\n     {res}{dur}"
 
-    c = user_cfg(uid)
+    c = get_user(uid)
     logos = []
     if c["bidhaan_on"]:
         logos.append(f"Bidhaan[{c['bidhaan_corner']}]")
@@ -1382,8 +1367,14 @@ async def _cb(_, cq: CallbackQuery):
 
     if data == "open:settings":
         await cq.answer()
-        return await cq.message.reply(
-            "⚙️ Send **/settings** to view and change logos, caption and quality.")
+        c = user_cfg(uid)
+        try:
+            return await cq.message.reply(
+                "⚙️ **Saved defaults**\n```\n" + _settings_text(uid) + "\n```"
+                if "_settings_text" in globals() else
+                "⚙️ Send /settings to open your settings.")
+        except Exception:
+            return await cq.message.reply("⚙️ Send /settings to open your settings.")
 
     if data == "dubflow:cancel":
         _dubflow.pop(uid, None)
@@ -1524,7 +1515,7 @@ def _brand_payload(uid: int) -> dict:
     burns in. Cover bars are omitted on purpose: they hide broadcaster banners
     burned into a StreamNxt-style source, and a clean HD master has none.
     """
-    c = user_cfg(uid)
+    c = get_user(uid)
     sc = c["logo_scale"]
     logos = []
     if c["streamnxt_on"]:
@@ -1557,8 +1548,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
     import dubsync_job
 
     status = await msgs[0].reply("🎬 **Dub-sync** — preparing…")
-    _active[uid] = {"proc": None, "cancelled": False, "phase": "Dub-sync",
-                    "task": asyncio.current_task()}
+    _active[uid] = {"proc": None, "cancelled": False, "phase": "Dub-sync"}
     prog = _DubProgress(status, dubsync_job._slug(_vmeta(msgs[hd_i])[0]))
     await prog.set("dl_hd", 0, force=True)
     jobs = []
@@ -1577,7 +1567,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         hd, dub = await asyncio.to_thread(
             dubsync_job.prepare_inputs, hd_src, dub_src, title)
 
-        c = user_cfg(uid)
+        c = get_user(uid)
         ow = hd_job["w"] if c["width"] == 0 else c["width"]
         oh = hd_job["h"] if c["height"] == 0 else c["height"]
         async def on_prog(label: str, pct: float):
@@ -1624,12 +1614,6 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                 f"💾 **Saved on the server** ({human_size(sz)}) — nothing is lost.\n"
                 f"Couldn't deliver now (over 2GB / MEGA full / no delivery set up). "
                 f"Free space or /loginpremium, then **/deliver**. No re-render.")
-    except asyncio.CancelledError:
-        try:
-            await status.edit("🛑 Dub-sync cancelled.")
-        except Exception:
-            pass
-        raise
     except Exception as e:
         if _act(uid).get("cancelled"):
             try:
@@ -1668,8 +1652,7 @@ async def _build_job(uid: int, m: Message, status: Message,
             elif dlt.ok(pct):
                 asyncio.run_coroutine_threadsafe(
                     status.edit(f"⬇️ **Downloading from MEGA** (fast)\n`{_bar(pct)}`"), loop)
-        _act(uid).update(proc=None, cancelled=False, phase="Download",
-                     task=asyncio.current_task())
+        _act(uid).update(proc=None, cancelled=False, phase="Download")
         try:
             path, name = await asyncio.to_thread(
                 delivery.mega_download, mo.group(0), dest, _cb,
@@ -1860,8 +1843,7 @@ async def _render_job(uid: int, job: dict, status: Message):
                             pass
 
             pt = asyncio.create_task(poller())
-            _act(uid).update(proc=None, cancelled=False, phase="Render",
-                         task=asyncio.current_task())
+            _act(uid).update(proc=None, cancelled=False, phase="Render")
             try:
                 await asyncio.to_thread(
                     render, src, out, events, cfg,

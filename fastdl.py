@@ -78,6 +78,7 @@ async def fast_download(
     client, message, dest: str,
     workers: int = DEFAULT_WORKERS,
     progress: Optional[Callable] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> str:
     """Download `message`'s media to `dest` using `workers` connections.
 
@@ -123,6 +124,8 @@ async def fast_download(
         with open(dest, "r+b") as f:
             off = start
             while off < end:
+                if should_cancel and should_cancel():
+                    raise asyncio.CancelledError()
                 limit = min(CHUNK, end - off)
                 # Telegram wants offset and limit 4 KB aligned; the last chunk
                 # may exceed `end`, which is fine — we simply write less.
