@@ -971,82 +971,6 @@ def _batch_panel_kb(uid: int, n: int) -> IKM:
     return IKM(rows)
 
 
-# Not a cap — downloads go over MTProto, which has no 2 GB ceiling (that is
-# the HTTP Bot API's limit). Purely the size past which the panel warns the
-# user the download will be slow.
-FASTDL_WORKERS = int(os.getenv("FASTDL_WORKERS", "8"))
-BOT_DL_LIMIT = int(1.95 * 1024 ** 3)
-
-
-class _DubProgress:
-    """The whole job in one message: phase checklist + overall + ETA."""
-
-    PHASES = [
-        ("dl_hd",   "Download HD"),
-        ("dl_dub",  "Download dub"),
-        ("engine",  "Conforming"),
-        ("upload",  "Delivering"),
-    ]
-    WEIGHT = {"dl_hd": 0.14, "dl_dub": 0.14, "engine": 0.62, "upload": 0.10}
-
-    def __init__(self, status: Message, title: str):
-        self.status = status
-        self.title = title
-        self.pct = {k: 0.0 for k, _ in self.PHASES}
-        self.note = {k: "" for k, _ in self.PHASES}
-        self.stage_label = ""
-        self.started = time.time()
-        self._thr = _Throttle()
-        self._last = ""
-
-    def overall(self) -> float:
-        return sum(self.pct[k] * self.WEIGHT[k] for k, _ in self.PHASES)
-
-    def _eta(self) -> str:
-        done = self.overall()
-        if done < 3:
-            return "estimating…"
-        el = time.time() - self.started
-        left = el * (100 - done) / done
-        if left < 90:
-            return f"~{int(left)}s left"
-        return f"~{int(left // 60)} min left"
-
-    def _render(self) -> str:
-        rows = []
-        for key, label in self.PHASES:
-            v = self.pct[key]
-            extra = f"  {self.note[key]}" if self.note[key] else ""
-            if v >= 100:
-                rows.append(f"✅ {label}{extra}")
-            elif v > 0:
-                lbl = self.stage_label if key == "engine" and self.stage_label else label
-                rows.append(f"⏳ {lbl}\n`{_bar(v)}`{extra}")
-            else:
-                rows.append(f"⬜ {label}")
-        return (f"🎬 **Dub-sync** · `{self.title}`\n"
-                + "\n".join(rows)
-                + f"\n\n**Overall** `{_bar(self.overall())}`\n{self._eta()}")
-
-    async def set(self, key: str, pct: float, note: str = "",
-                  label: str = "", force: bool = False):
-        self.pct[key] = max(0.0, min(100.0, pct))
-        if note:
-            self.note[key] = note
-        if label:
-            self.stage_label = label
-        if not force and not self._thr.ok(self.overall()):
-            return
-        txt = self._render()
-        if txt == self._last:
-            return
-        self._last = txt
-        try:
-            await self.status.edit(txt, reply_markup=IKM([[IKB("🛑 Cancel", "cancel")]]))
-        except Exception:
-            pass
-
-
 def _vmeta(m: Message) -> tuple[str, int, int, float]:
     """Name/size/duration straight from Telegram — no download needed."""
     v = m.video or m.document
@@ -1055,31 +979,6 @@ def _vmeta(m: Message) -> tuple[str, int, int, float]:
     h = int(getattr(v, "height", 0) or 0)
     dur = float(getattr(v, "duration", 0) or 0)
     return name, w, h, dur
-
-
-def _dub_size_warning(msgs: list) -> str:
-    """Tell the user what a large input means for the wait — not a blocker.
-
-    These files are already in Telegram, and downloads here go over MTProto,
-    which has no 2 GB ceiling (that limit belongs to the HTTP Bot API). So a
-    3 GB master downloads fine; it just takes a while, and the panel should say
-    so rather than leaving someone staring at a bar. A MEGA link is the faster
-    route when the file happens to be there too.
-    """
-    total = 0
-    biggest = 0
-    for m in msgs:
-        v = m.video or m.document
-        sz = int(getattr(v, "file_size", 0) or 0)
-        total += sz
-        biggest = max(biggest, sz)
-    if total <= 0:
-        return ""
-    line = f"\n📥 To download: **{human_size(total)}**"
-    if biggest > BOT_DL_LIMIT:
-        line += ("\n   _Large file — this part can take a while. A MEGA link "
-                 "downloads faster if you have one._")
-    return line + "\n"
 
 
 def _dub_panel_text(uid: int) -> str:
@@ -1118,9 +1017,8 @@ def _dub_panel_text(uid: int) -> str:
         + line("📺 **HD master**", hd_n, hw, hh, hdur) + "\n"
         + line("🗣 **Somali dub**", du_n, dw, dh, ddur) + "\n\n"
         + brand_line + "\n"
-        + f"📐 Output: {res} · CRF {settings.x264_crf}\n"
-        + _dub_size_warning(msgs)
-        + "\n_The dub's own intro and closing promo are removed automatically; "
+        + f"📐 Output: {res} · CRF {settings.x264_crf}\n\n"
+        "_The dub's own intro and closing promo are removed automatically; "
         "the HD intro is kept with its own audio._\n"
         "⚠️ Wrong way round? Tap **Swap**."
     )
@@ -1437,31 +1335,40 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
     """Conform an HD master to a Somali dub, branded in the same single pass."""
     import dubsync_job
 
-    status = await msgs[0].reply("🎬 **Dub-sync** — preparing…")
+    status = await msgs[0].reply("🎬 **Dub-sync**\n`" + _bar(0) + "`\nPreparing…")
     _active[uid] = {"proc": None, "cancelled": False, "phase": "Dub-sync"}
-    prog = _DubProgress(status, dubsync_job._slug(_vmeta(msgs[hd_i])[0]))
-    await prog.set("dl_hd", 0, force=True)
     jobs = []
     try:
-        for i, m in enumerate(msgs):
-            key = "dl_hd" if i == hd_i else "dl_dub"
-            jobs.append(await _build_job(uid, m, status, prog=prog, key=key))
-            await prog.set(key, 100, note=human_size(os.path.getsize(jobs[-1]["src"])),
-                           force=True)
+        for i, m in enumerate(msgs, 1):
+            await status.edit(f"⬇️ **Downloading file {i}/2**")
+            jobs.append(await _build_job(uid, m, status))
 
         # The user confirmed (and could correct) the pairing on the panel, so
         # honour that rather than re-guessing from the downloaded files.
         hd_job, dub_job = jobs[hd_i], jobs[1 - hd_i]
         hd_src, dub_src = Path(hd_job["src"]), Path(dub_job["src"])
         title = dubsync_job._slug(hd_job["name"])
+        await status.edit(
+            f"🔎 **Identified**\n"
+            f"HD  `{hd_job['name'][:40]}` {hd_job['w']}×{hd_job['h']}\n"
+            f"Dub `{dub_job['name'][:40]}` {dub_job['w']}×{dub_job['h']}\n\n"
+            f"Starting — this takes a while on a full episode.")
         hd, dub = await asyncio.to_thread(
             dubsync_job.prepare_inputs, hd_src, dub_src, title)
 
         c = get_user(uid)
         ow = hd_job["w"] if c["width"] == 0 else c["width"]
         oh = hd_job["h"] if c["height"] == 0 else c["height"]
+        thr = _Throttle()
+
         async def on_prog(label: str, pct: float):
-            await prog.set("engine", pct, label=label)
+            if thr.ok(pct):
+                try:
+                    await status.edit(
+                        f"🎬 **Dub-sync** — `{title}`\n{label}\n`{_bar(pct)}`",
+                        reply_markup=IKM([[IKB("🛑 Cancel", "cancel")]]))
+                except Exception:
+                    pass
 
         res = await dubsync_job.run_dubsync(
             hd, dub, title, (_brand_payload(uid) if brand else None),
@@ -1486,8 +1393,6 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                  "dur": odur, "size": sz, "ts": time.time()}
         _add_pending(uid, entry)
 
-        await prog.set("engine", 100, force=True)
-        await prog.set("upload", 1, force=True)
         if await _deliver_file(uid, entry, status, msgs[0]):
             _remove_pending(uid, saved)
             try:
@@ -1521,8 +1426,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                 pass
 
 
-async def _build_job(uid: int, m: Message, status: Message,
-                     prog=None, key: str = "") -> dict:
+async def _build_job(uid: int, m: Message, status: Message) -> dict:
     """Download the file (Telegram video/doc OR a MEGA link in the message) to a
     FRESH work dir, probe it, return a job dict. Raises on failure/cancel."""
     work = _new_work()
@@ -1533,9 +1437,7 @@ async def _build_job(uid: int, m: Message, status: Message,
         loop = asyncio.get_event_loop()
 
         def _cb(pct):
-            if prog is not None and key:
-                asyncio.run_coroutine_threadsafe(prog.set(key, pct, note="MEGA"), loop)
-            elif dlt.ok(pct):
+            if dlt.ok(pct):
                 asyncio.run_coroutine_threadsafe(
                     status.edit(f"⬇️ **Downloading from MEGA** (fast)\n`{_bar(pct)}`"), loop)
         _act(uid).update(proc=None, cancelled=False, phase="Download")
@@ -1549,35 +1451,13 @@ async def _build_job(uid: int, m: Message, status: Message,
         dlt = _Throttle()
 
         async def _dlp(cur, tot):
-            if not tot:
-                return
-            pct = cur / tot * 100
-            if prog is not None and key:
-                await prog.set(key, pct, note=f"{human_size(cur)}/{human_size(tot)}")
-            elif dlt.ok(pct):
+            if tot and dlt.ok(cur / tot * 100):
                 try:
-                    await status.edit(f"⬇️ **Downloading**\n`{_bar(pct)}`\n"
+                    await status.edit(f"⬇️ **Downloading**\n`{_bar(cur / tot * 100)}`\n"
                                       f"{human_size(cur)} / {human_size(tot)}")
                 except Exception:
                     pass
-        # Parallel chunked download first: pyrogram uses one connection, and
-        # Telegram throttles the connection rather than the file, so several
-        # sessions pulling different byte ranges is several times faster. Falls
-        # back to the ordinary download on anything unexpected — a slow file is
-        # a nuisance, a failed job after twenty minutes is worse.
-        path = None
-        try:
-            import fastdl
-            _act(uid).update(phase="Download")
-            path = await fastdl.fast_download(
-                app, m, dest, workers=FASTDL_WORKERS, progress=_dlp)
-            log.info("fast download OK: %s", dest)
-        except Exception as e:
-            log.info("fast download unavailable (%s) — using normal download",
-                     str(e)[:120])
-            path = None
-        if not path:
-            path = await m.download(file_name=dest, progress=_dlp)
+        path = await m.download(file_name=dest, progress=_dlp)
         name = (getattr(m.video, "file_name", None)
                 or getattr(m.document, "file_name", None) or "video.mp4")
     w, h, dur = await asyncio.to_thread(probe, path)

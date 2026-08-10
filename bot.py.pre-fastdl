@@ -974,7 +974,6 @@ def _batch_panel_kb(uid: int, n: int) -> IKM:
 # Not a cap — downloads go over MTProto, which has no 2 GB ceiling (that is
 # the HTTP Bot API's limit). Purely the size past which the panel warns the
 # user the download will be slow.
-FASTDL_WORKERS = int(os.getenv("FASTDL_WORKERS", "8"))
 BOT_DL_LIMIT = int(1.95 * 1024 ** 3)
 
 
@@ -1560,24 +1559,7 @@ async def _build_job(uid: int, m: Message, status: Message,
                                       f"{human_size(cur)} / {human_size(tot)}")
                 except Exception:
                     pass
-        # Parallel chunked download first: pyrogram uses one connection, and
-        # Telegram throttles the connection rather than the file, so several
-        # sessions pulling different byte ranges is several times faster. Falls
-        # back to the ordinary download on anything unexpected — a slow file is
-        # a nuisance, a failed job after twenty minutes is worse.
-        path = None
-        try:
-            import fastdl
-            _act(uid).update(phase="Download")
-            path = await fastdl.fast_download(
-                app, m, dest, workers=FASTDL_WORKERS, progress=_dlp)
-            log.info("fast download OK: %s", dest)
-        except Exception as e:
-            log.info("fast download unavailable (%s) — using normal download",
-                     str(e)[:120])
-            path = None
-        if not path:
-            path = await m.download(file_name=dest, progress=_dlp)
+        path = await m.download(file_name=dest, progress=_dlp)
         name = (getattr(m.video, "file_name", None)
                 or getattr(m.document, "file_name", None) or "video.mp4")
     w, h, dur = await asyncio.to_thread(probe, path)
