@@ -6,9 +6,25 @@ services:
     env_file: .env
     environment:
       - TZ=UTC
+      # brand.py inside the engine imports the bot's branding.py from here, so
+      # the path must be identical inside the container and on the host.
+      - BIDHAAN_DIR=/opt/Bidhanlogoedit
     volumes:
       - bot_data:/app/data
       - ./assets:/app/assets:ro
+
+      # ---- dub-sync engine -------------------------------------------------
+      # Mounted at the SAME paths the host uses, because the venv's shebangs and
+      # brand.py's import path are absolute. Mounting them elsewhere would break
+      # both.
+      - /opt/dubsync2:/opt/dubsync2
+      - /opt/dubsync:/opt/dubsync
+      # The venv's python is a symlink into uv's store, so the interpreter it
+      # points at has to be visible too or nothing in .venv/bin will run.
+      - /root/.local/share/uv/python:/root/.local/share/uv/python:ro
+      # The engine imports the bot's own branding code (single source of truth
+      # for logo placement); read-only so a bug in the engine can never edit it.
+      - /opt/Bidhanlogoedit:/opt/Bidhanlogoedit:ro
     logging:
       driver: "json-file"
       options:

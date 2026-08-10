@@ -16,7 +16,6 @@ import json
 import time
 import shutil
 import asyncio
-from pathlib import Path
 import logging
 
 import uvloop
@@ -962,10 +961,6 @@ def _batch_panel_kb(uid: int, n: int) -> IKM:
     tpls = list(get_templates(uid))
     if tpls:
         rows.append([IKB(f"🎬 {x}", f"btpl:{x}") for x in tpls[:3]])
-    if n == 2:
-        # Exactly two files is the shape of an HD + Somali-dub pair. Offered as
-        # a choice rather than assumed — two files to brand is still valid.
-        rows.append([IKB("🎬 Dub-sync these two", "bdub")])
     rows += [[IKB(f"✅ Render all ({n})", "bgo")], [IKB("❌ Clear queue", "bclear")]]
     return IKM(rows)
 
@@ -1075,21 +1070,6 @@ async def _cb(_, cq: CallbackQuery):
         await cq.message.edit("📦 Queue cleared.")
         return await cq.answer()
 
-    if data == "bdub":
-        msgs = _batch.get(uid) or []
-        if len(msgs) != 2:
-            return await cq.answer("Send exactly 2 files: the HD and the dub.",
-                                   show_alert=True)
-        _batch.pop(uid, None)
-        _batch_panel.pop(uid, None)
-        await cq.answer("Starting dub-sync…")
-        try:
-            await cq.message.edit("🎬 **Dub-sync starting** — HD + Somali dub")
-        except Exception:
-            pass
-        asyncio.create_task(_run_dubsync(uid, msgs))
-        return
-
     if data == "bgo" or data.startswith("btpl:"):
         if not _batch.get(uid):
             return await cq.answer("Queue is empty.", show_alert=True)
@@ -1181,135 +1161,6 @@ async def _cb(_, cq: CallbackQuery):
         await cq.answer("Starting…")
         await _do_render(cq, uid, job)
         return
-
-
-# ------------------------------------------------------------- dub-sync
-def _brand_payload(uid: int) -> dict:
-    """The user's CURRENT branding settings, in the shape dubsync expects.
-
-    Deliberately the same fields the branding path builds its RenderConfig
-    from, so whatever is configured with /settings is what the conform render
-    burns in. Cover bars are omitted on purpose: they hide broadcaster banners
-    burned into a StreamNxt-style source, and a clean HD master has none.
-    """
-    c = get_user(uid)
-    sc = c["logo_scale"]
-    logos = []
-    if c["streamnxt_on"]:
-        logos.append({"path": _asset(settings.logo_tr), "corner": c["streamnxt_corner"],
-                      "frac": c["streamnxt_frac"] * sc,
-                      "margin_x": c["streamnxt_mx"], "margin_y": c["streamnxt_my"]})
-    if c["bidhaan_on"]:
-        logos.append({"path": _asset(settings.logo_tl), "corner": c["bidhaan_corner"],
-                      "frac": c["bidhaan_frac"] * sc,
-                      "margin_x": c["bidhaan_mx"], "margin_y": c["bidhaan_my"]})
-    if c["bidhaan2_on"]:
-        logos.append({"path": _asset(settings.logo_tl), "corner": c["bidhaan2_corner"],
-                      "frac": c["bidhaan2_frac"] * sc,
-                      "margin_x": c["bidhaan2_mx"], "margin_y": c["bidhaan2_my"]})
-    return {
-        "logos": logos,
-        "scroll_text": c["scroll_text"],
-        "scroll_seconds": c["scroll_seconds"],
-        "scroll_count": c["scroll_count"],
-        "scroll_times": [mn * 60 for mn in c.get("scroll_times", [])],
-        "caption_scale": c.get("caption_scale", 0.016),
-        "logo_start": c.get("logo_start_min", 0.0) * 60,
-        "text_start": c.get("text_start_min", 0.0) * 60,
-    }
-
-
-async def _run_dubsync(uid: int, msgs: list) -> None:
-    """Conform an HD master to a Somali dub, branded in the same single pass."""
-    import dubsync_job
-
-    status = await msgs[0].reply("🎬 **Dub-sync**\n`" + _bar(0) + "`\nPreparing…")
-    _active[uid] = {"proc": None, "cancelled": False, "phase": "Dub-sync"}
-    jobs = []
-    try:
-        for i, m in enumerate(msgs, 1):
-            await status.edit(f"⬇️ **Downloading file {i}/2**")
-            jobs.append(await _build_job(uid, m, status))
-
-        a, b = Path(jobs[0]["src"]), Path(jobs[1]["src"])
-        hd_src, dub_src = await asyncio.to_thread(dubsync_job.identify_pair, a, b)
-        hd_job = jobs[0] if Path(jobs[0]["src"]) == hd_src else jobs[1]
-        dub_job = jobs[1] if hd_job is jobs[0] else jobs[0]
-        title = dubsync_job._slug(hd_job["name"])
-        await status.edit(
-            f"🔎 **Identified**\n"
-            f"HD  `{hd_job['name'][:40]}` {hd_job['w']}×{hd_job['h']}\n"
-            f"Dub `{dub_job['name'][:40]}` {dub_job['w']}×{dub_job['h']}\n\n"
-            f"Starting — this takes a while on a full episode.")
-        hd, dub = await asyncio.to_thread(
-            dubsync_job.prepare_inputs, hd_src, dub_src, title)
-
-        c = get_user(uid)
-        ow = hd_job["w"] if c["width"] == 0 else c["width"]
-        oh = hd_job["h"] if c["height"] == 0 else c["height"]
-        thr = _Throttle()
-
-        async def on_prog(label: str, pct: float):
-            if thr.ok(pct):
-                try:
-                    await status.edit(f"{label}\n`{_bar(pct)}`")
-                except Exception:
-                    pass
-
-        res = await dubsync_job.run_dubsync(
-            hd, dub, title, _brand_payload(uid),
-            width=ow, height=oh, crf=settings.x264_crf,
-            on_progress=on_prog)
-
-        if not res.ok or not res.path:
-            return await status.edit(f"❌ Dub-sync failed: `{res.message}`")
-
-        sz = os.path.getsize(res.path)
-        ow2, oh2, odur = await asyncio.to_thread(probe, str(res.path))
-        cap = dubsync_job.summary_caption(title, res, odur, sz)
-        name = f"dubsync_{os.path.basename(hd_job['name'])}"
-
-        # Same protection the branding path gets: keep the finished file in the
-        # outbox BEFORE attempting delivery, so a 2h render is never lost to a
-        # full MEGA account or a missing premium session.
-        os.makedirs(OUTBOX, exist_ok=True)
-        saved = os.path.join(OUTBOX, f"{int(time.time())}_{uid}_{name}")
-        await asyncio.to_thread(shutil.move, str(res.path), saved)
-        entry = {"path": saved, "name": name, "cap": cap, "w": ow2, "h": oh2,
-                 "dur": odur, "size": sz, "ts": time.time()}
-        _add_pending(uid, entry)
-
-        if await _deliver_file(uid, entry, status, msgs[0]):
-            _remove_pending(uid, saved)
-            try:
-                os.remove(saved)
-            except OSError:
-                pass
-            await status.delete()
-        else:
-            await status.edit(
-                f"💾 **Saved on the server** ({human_size(sz)}) — nothing is lost.\n"
-                f"Couldn't deliver now (over 2GB / MEGA full / no delivery set up). "
-                f"Free space or /loginpremium, then **/deliver**. No re-render.")
-    except Exception as e:
-        if _act(uid).get("cancelled"):
-            try:
-                await status.edit("🛑 Dub-sync cancelled.")
-            except Exception:
-                pass
-        else:
-            log.exception("dubsync failed")
-            try:
-                await status.edit(f"❌ Dub-sync failed: `{str(e)[:300]}`")
-            except Exception:
-                pass
-    finally:
-        _active.pop(uid, None)
-        for j in jobs:
-            try:
-                shutil.rmtree(j["work"], ignore_errors=True)
-            except Exception:
-                pass
 
 
 async def _build_job(uid: int, m: Message, status: Message) -> dict:
