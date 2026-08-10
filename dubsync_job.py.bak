@@ -112,8 +112,6 @@ async def run_dubsync(
     width: int, height: int, crf: int,
     on_progress: Callable[[str, float], "asyncio.Future | None"],
     max_accidental: float = 20.0,
-    register: Optional[Callable[[object], None]] = None,
-    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> DubResult:
     """Run the pipeline, reporting (stage label, overall 0..100) as it goes."""
     out_name = f"{title}_final.mp4"
@@ -152,30 +150,15 @@ async def run_dubsync(
     pat_intro = re.compile(r"Dub intro removed:\s*(\d+) shots")
     pat_promo = re.compile(r"trailing promo")
 
-    def _cancelled() -> bool:
-        return bool(should_cancel and should_cancel())
-
     for key, label, weight in STAGES:
-        if _cancelled():
-            return DubResult(False, None, "cancelled", stats)
         cmd = cmds[key]
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT)
-        # Hand the process to the caller so /cancel and the Cancel button can
-        # actually kill it — without this the job runs on after "cancelled".
-        if register:
-            register(proc)
         assert proc.stdout is not None
         inner = 0.0
         last_emit = 0.0
         async for raw in proc.stdout:
-            if _cancelled():
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                return DubResult(False, None, "cancelled", stats)
             line = raw.decode("utf-8", "replace")
             m = pat_frac.search(line)
             if m:
@@ -200,10 +183,6 @@ async def run_dubsync(
                 if asyncio.iscoroutine(res):
                     await res
         rc = await proc.wait()
-        if register:
-            register(None)
-        if _cancelled():
-            return DubResult(False, None, "cancelled", stats)
         if rc != 0:
             return DubResult(False, None, f"{label} failed (exit {rc})", stats)
         done_weight += weight

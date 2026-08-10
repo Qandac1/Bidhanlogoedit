@@ -652,9 +652,9 @@ async def _loginpremium(_, m: Message):
                   "(Send /cancel to stop.)")
 
 
-async def _cancel_everything(uid: int) -> list:
-    """Stop whatever this user has running. Shared by /cancel and the button,
-    so the button can no longer claim to cancel while the job keeps going."""
+@app.on_message(filters.command("cancel") & filters.private)
+async def _cancel(_, m: Message):
+    uid = m.from_user.id
     done = []
     # 0) a batch: stop the whole queue (and the current item below)
     if _dubflow.pop(uid, None) is not None:
@@ -691,14 +691,7 @@ async def _cancel_everything(uid: int) -> list:
                 pass
         if not done:
             done.append("✖️ Login cancelled")
-    return done
-
-
-@app.on_message(filters.command("cancel") & filters.private)
-async def _cancel(_, m: Message):
-    done = await _cancel_everything(m.from_user.id)
     await m.reply("\n".join(done) if done else "Nothing to cancel.")
-
 
 
 @app.on_message(filters.command(["dub", "dubsync"]) & filters.private)
@@ -1327,13 +1320,9 @@ async def _cb(_, cq: CallbackQuery):
                                show_alert=True)
 
     if data == "cancel":
-        done = await _cancel_everything(uid)
-        try:
-            await cq.message.edit("🛑 " + ("\n".join(done) if done
-                                           else "Cancelled."))
-        except Exception:
-            pass
-        return await cq.answer("Cancelled")
+        _pending.pop(uid, None)
+        await cq.message.edit("❌ Cancelled.")
+        return await cq.answer()
 
     # ---- batch queue controls (no _pending job needed) ----
     if data == "bclear":
@@ -1576,13 +1565,9 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         res = await dubsync_job.run_dubsync(
             hd, dub, title, (_brand_payload(uid) if brand else None),
             width=ow, height=oh, crf=settings.x264_crf,
-            on_progress=on_prog,
-            register=lambda pr: _act(uid).__setitem__("proc", pr),
-            should_cancel=lambda: bool(_act(uid).get("cancelled")))
+            on_progress=on_prog)
 
         if not res.ok or not res.path:
-            if res.message == "cancelled" or _act(uid).get("cancelled"):
-                return await status.edit("🛑 Dub-sync cancelled.")
             return await status.edit(f"❌ Dub-sync failed: `{res.message}`")
 
         sz = os.path.getsize(res.path)
