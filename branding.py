@@ -81,6 +81,36 @@ def probe(video: str) -> tuple[int, int, float]:
     return w, h, dur
 
 
+def has_audio_stream(video: str) -> bool:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=codec_type",
+         "-of", "csv=p=0", video],
+        capture_output=True, text=True, check=False,
+    )
+    return bool(r.stdout.strip())
+
+
+def verify_decodable(video: str, timeout: int = 1800) -> tuple[bool, str]:
+    """Decode the whole file start to finish, keeping nothing — the cheapest
+    real proof a delivered render isn't broken. Catches a corrupted segment,
+    a bad concat join, or a truncated file that still reports a plausible
+    duration, none of which a "did the pipeline exit 0" check would notice.
+    `-v error` means any output at all is a genuine decode problem, not
+    routine logging.
+    """
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", video, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"decode check itself hung past {timeout}s"
+    if r.returncode != 0 or r.stderr.strip():
+        return False, (r.stderr or "").strip()[-500:]
+    return True, ""
+
+
 def estimate_size_bytes(duration: float, video_bitrate_k: int,
                         audio_bitrate_k: int = 128) -> int:
     """Predicted output size, the way Wondershare shows it before export."""

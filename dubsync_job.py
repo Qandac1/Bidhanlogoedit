@@ -339,6 +339,10 @@ async def run_dubsync(
     pat_dup = re.compile(r"accidental:\s*([\d.]+)s")
     pat_intro = re.compile(r"Dub intro removed:\s*(\d+) shots")
     pat_promo = re.compile(r"trailing promo")
+    # The render's own planned duration, so the caller can catch a delivered
+    # file whose real length silently drifted from what was actually cut —
+    # the cheapest possible smoke test for "did this ship intact."
+    pat_expected_dur = re.compile(r"Expected duration:\s*([\d.]+)s")
 
     def _cancelled() -> bool:
         return bool(should_cancel and should_cancel())
@@ -422,6 +426,8 @@ async def run_dubsync(
                 stats["intro_shots"] = m.group(1)
             if pat_promo.search(line):
                 stats["promo_removed"] = "yes"
+            if (m := pat_expected_dur.search(line)):
+                stats["expected_duration_s"] = float(m.group(1))
 
             pct = (done_weight + weight * inner) / total_weight * 100.0
             if pct - last_emit >= 1.0:

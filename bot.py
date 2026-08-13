@@ -29,7 +29,7 @@ from pyrogram.types import (
 
 from config import settings
 from branding import (
-    Logo, RenderConfig, render, probe,
+    Logo, RenderConfig, render, probe, verify_decodable, has_audio_stream,
     estimate_size_bytes, bitrate_for_target, human_size,
 )
 from detect import detect_ad_banners
@@ -956,8 +956,16 @@ def _bar(pct: float, width: int = 12) -> str:
 
 
 class _Throttle:
-    """Limit how often we edit the status message (Telegram rate-limits edits)."""
-    def __init__(self, min_pct: float = 5.0, min_sec: float = 3.0):
+    """Limit how often we edit the status message (Telegram rate-limits edits).
+
+    5.0/3.0 made the bar look frozen for long stretches then jump — a 30%-
+    weighted stage like analyze could run for minutes without its own
+    internal progress ever moving the OVERALL number by a full 5 points, so
+    real, live progress was being silently dropped on the floor. 1.2/2.0
+    still comfortably respects Telegram's edit rate limit (roughly 1/sec)
+    while actually reflecting what the engine is reporting.
+    """
+    def __init__(self, min_pct: float = 1.2, min_sec: float = 2.0):
         self.min_pct, self.min_sec = min_pct, min_sec
         self.last_pct, self.last_t = -100.0, 0.0
 
@@ -1730,10 +1738,50 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         ow = hd_job["w"] if c["width"] == 0 else c["width"]
         oh = hd_job["h"] if c["height"] == 0 else c["height"]
 
+        # Pre-flight: catch an unusable pairing before spending 30-90+
+        # minutes discovering it near the end. Both files need an audio
+        # track (the dub obviously; the HD for its own intro audio), and a
+        # wildly mismatched runtime is very likely not the same film — not
+        # proof, since a real edit can cut a lot, but this only rejects
+        # extremes (a trailer sent instead of the film, a swapped pair)
+        # rather than second-guessing a pairing the user already confirmed.
+        hd_has_audio, dub_has_audio = await asyncio.gather(
+            asyncio.to_thread(has_audio_stream, str(hd_src)),
+            asyncio.to_thread(has_audio_stream, str(dub_src)))
+        hd_dur, dub_dur = hd_job.get("duration") or 0, dub_job.get("duration") or 0
+        ratio = (dub_dur / hd_dur) if hd_dur > 0 else 0
+        preflight_problems = []
+        if not hd_has_audio:
+            preflight_problems.append("the HD file has no audio track")
+        if not dub_has_audio:
+            preflight_problems.append("the dub file has no audio track")
+        if hd_dur > 0 and dub_dur > 0 and not (0.10 <= ratio <= 1.5):
+            preflight_problems.append(
+                f"runtime mismatch — HD {hd_dur / 60:.0f}min vs dub "
+                f"{dub_dur / 60:.0f}min (these may not be the same film)")
+        if preflight_problems:
+            return await status.edit(
+                "⚠️ **Pre-flight check failed** — stopping before the "
+                "expensive part rather than burning an hour to fail anyway.\n"
+                + "\n".join(f"• {p}" for p in preflight_problems)
+                + "\n\nDouble-check the pairing and resend if this is wrong.")
+
         await prog.set("engine", 0, label="🎞 Preparing master", force=True)
 
+        _last_stage_label = "🎞 Preparing master"
+
         async def on_prog(label: str, pct: float):
-            await prog.set("engine", pct, label=label)
+            nonlocal _last_stage_label
+            # A stage change (e.g. "Preparing master" -> "Analysing shots")
+            # must reach Telegram immediately, not wait for the normal
+            # percentage throttle: both stages start at 0%, so _Throttle.ok()
+            # saw "nothing changed" and silently dropped the label switch —
+            # the panel sat on the previous stage's name while the job had
+            # already moved on and was working fine. Routine same-stage
+            # percentage ticks still go through the normal throttle below.
+            force = label != _last_stage_label
+            _last_stage_label = label
+            await prog.set("engine", pct, label=label, force=force)
 
         # prepare_inputs now spawns ffmpeg/ffprobe with asyncio's own
         # subprocess machinery (like every stage below already does) instead
@@ -1764,6 +1812,37 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
 
         sz = os.path.getsize(res.path)
         ow2, oh2, odur = await asyncio.to_thread(probe, str(res.path))
+
+        # QA gate: "the pipeline exited 0" is not the same thing as "this is
+        # a good file." Two cheap, independent checks before anything is
+        # handed to the user as a finished product — a real duration drift
+        # (a dropped chunk that somehow got past the render's own hard-fail
+        # on missing segments) and a full decode-through (catches a corrupt
+        # segment or a bad concat join that a duration check alone would
+        # miss, since it doesn't change the runtime).
+        expected = res.stats.get("expected_duration_s")
+        tol = max(5.0, (expected or 0) * 0.005)
+        dur_bad = bool(expected) and odur > 0 and abs(odur - expected) > tol
+        ok_decode, decode_err = await asyncio.to_thread(verify_decodable, str(res.path))
+        if dur_bad or not ok_decode:
+            os.makedirs(OUTBOX, exist_ok=True)
+            qa_saved = os.path.join(
+                OUTBOX,
+                f"{int(time.time())}_{uid}_qafail_{os.path.basename(hd_job['name'])}")
+            await asyncio.to_thread(shutil.move, str(res.path), qa_saved)
+            reasons = []
+            if dur_bad:
+                reasons.append(f"duration {odur:.1f}s vs expected {expected:.1f}s")
+            if not ok_decode:
+                reasons.append(f"decode error: {decode_err[-200:]}")
+            log.error("QA gate failed for %s: %s", title, "; ".join(reasons))
+            return await status.edit(
+                "⚠️ **Render finished but failed the quality check** — not "
+                "auto-delivered, so a broken file doesn't land in your chat "
+                f"unannounced.\n`{'; '.join(reasons)[:300]}`\n\n"
+                f"Saved at `{qa_saved}` if you want to inspect it yourself "
+                "— otherwise just retry.")
+
         cap = dubsync_job.summary_caption(title, res, odur, sz)
         name = f"dubsync_{os.path.basename(hd_job['name'])}"
 
@@ -1886,7 +1965,19 @@ async def _build_job(uid: int, m: Message, status: Message,
 # ----------------------------------------------------------------- render
 async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Message) -> bool:
     """Send one finished file (Telegram / premium / MEGA). Returns True on
-    success. On failure it leaves the file in the outbox so it can be retried."""
+    success. On failure it leaves the file in the outbox so it can be retried.
+
+    Each viable method is tried in order and falls through to the next on
+    ANY failure — not just "too big," any exception. These used to be
+    mutually-exclusive elif branches chosen once by a size pre-check: a 2.43
+    GB render passed the "sz <= PREMIUM_LIMIT" check (PREMIUM_LIMIT assumes
+    Telegram's documented 4 GB premium ceiling) but pyrogram's own
+    save_file() enforces 2000 MiB whenever it doesn't see confirmed premium
+    status on the session — so the upload was attempted, rejected, and the
+    whole delivery just died even though MEGA (already configured, no real
+    size limit) was sitting right there unused. A render that took an hour
+    to produce should never dead-end because ONE upload path had a bad day.
+    """
     out = entry["path"]
     if not os.path.exists(out):
         _remove_pending(uid, out)
@@ -1898,8 +1989,10 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
     sz = os.path.getsize(out)
     cap, name = entry["cap"], entry["name"]
     ow, oh, odur = int(entry.get("w", 0)), int(entry.get("h", 0)), entry.get("dur", 0)
-    try:
-        if sz <= TG_LIMIT:
+    errors: list[str] = []
+
+    if sz <= TG_LIMIT:
+        try:
             ult = _Throttle()
 
             async def _ulp(cur, tot):
@@ -1912,7 +2005,12 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
             await reply_to.reply_video(out, duration=int(odur), width=ow, height=oh,
                                        supports_streaming=True, caption=cap, progress=_ulp)
             return True
-        elif _premium_session() and sz <= PREMIUM_LIMIT:
+        except Exception as e:
+            errors.append(f"Telegram: {str(e)[:150]}")
+            log.warning("Telegram upload failed, trying the next method: %s", e)
+
+    if _premium_session() and sz <= PREMIUM_LIMIT:
+        try:
             put = _Throttle()
 
             async def _pp(cur, tot):
@@ -1929,7 +2027,12 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
             if where != "your chat":
                 await reply_to.reply(f"{cap}\n📥 Sent to {where}.")
             return True
-        elif delivery.mega_is_configured():
+        except Exception as e:
+            errors.append(f"premium: {str(e)[:150]}")
+            log.warning("Premium upload failed, trying the next method: %s", e)
+
+    if delivery.mega_is_configured():
+        try:
             await status.edit(f"☁️ {human_size(sz)} — uploading to MEGA…")
             loop = asyncio.get_event_loop()
             megt = _Throttle(min_sec=3.0)
@@ -1939,17 +2042,27 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
                     asyncio.run_coroutine_threadsafe(
                         status.edit(f"☁️ **Uploading to MEGA**\n`{_bar(pct)}`"), loop)
             link = await asyncio.to_thread(delivery.mega_upload, out, name, _mcb)
-            await reply_to.reply(f"{cap}\n📥 Too big for Telegram — **MEGA link:**\n{link}")
+            await reply_to.reply(f"{cap}\n📥 **MEGA link:**\n{link}")
             return True
+        except Exception as e:
+            errors.append(f"MEGA: {str(e)[:150]}")
+            log.exception("MEGA upload failed")
+
+    log.error("every delivery method failed for %s: %s", out, "; ".join(errors))
+    try:
+        if errors:
+            await status.edit(
+                "⚠️ **Every delivery method failed** — the file is safe and "
+                "kept for retry via /files.\n"
+                + "\n".join(f"• {e}" for e in errors[:3]))
         else:
-            return False    # no delivery method available right now
-    except Exception as e:
-        log.exception("delivery failed")
-        try:
-            await status.edit(f"⚠️ Delivery failed: `{str(e)[:200]}`")
-        except Exception:
-            pass
-        return False
+            await status.edit(
+                "⚠️ No delivery method available for this file right now "
+                "(too big for Telegram, no premium/MEGA configured). It's "
+                "saved — set up /mega or check back later.")
+    except Exception:
+        pass
+    return False
 
 
 async def _do_render(cq: CallbackQuery, uid: int, job: dict):
