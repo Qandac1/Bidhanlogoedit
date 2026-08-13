@@ -87,6 +87,16 @@ def _add_pending(uid: int, entry: dict) -> None:
     _save_pending(d)
 
 
+# Files currently mid-delivery. /deliver doesn't remove a pending entry
+# until it succeeds, so sending the command twice in a row (impatience is
+# reasonable — an upload gives no feedback until it's already through the
+# faster methods and reaches MEGA) started two independent uploads of the
+# exact same file racing each other. Real incident: two rclone processes
+# both pushing the same 2.26 GB file to the same MEGA destination at once,
+# wasting bandwidth on both connections for nothing.
+_delivering: set[str] = set()
+
+
 def _remove_pending(uid: int, path: str) -> None:
     d = _load_pending()
     lst = [e for e in d.get(str(uid), []) if e.get("path") != path]
@@ -846,10 +856,25 @@ async def _deliver_cmd(_, m: Message):
     lst = [e for e in _load_pending().get(str(uid), []) if os.path.exists(e.get("path", ""))]
     if not lst:
         return await m.reply("No files waiting to deliver.")
-    await m.reply(f"📤 Delivering {len(lst)} saved file(s)…")
+    skipped_inflight = [e for e in lst if e["path"] in _delivering]
+    lst = [e for e in lst if e["path"] not in _delivering]
+    if not lst:
+        return await m.reply(
+            "⏳ Already delivering that file from an earlier /deliver — "
+            "large uploads take a while and give no feedback until they "
+            "reach the file-hosting step. Sending the command again won't "
+            "make it faster, just wait for it to finish.")
+    await m.reply(f"📤 Delivering {len(lst)} saved file(s)…"
+                  + (f" ({len(skipped_inflight)} already in progress, skipped)"
+                     if skipped_inflight else ""))
     for e in lst:
         status = await m.reply(f"📦 {e['name']} ({human_size(e.get('size', 0))})…")
-        if await _deliver_file(uid, e, status, m):
+        _delivering.add(e["path"])
+        try:
+            ok = await _deliver_file(uid, e, status, m)
+        finally:
+            _delivering.discard(e["path"])
+        if ok:
             _remove_pending(uid, e["path"])
             try:
                 os.remove(e["path"])
