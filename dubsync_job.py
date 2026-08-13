@@ -34,6 +34,13 @@ DUBSYNC = "/opt/dubsync2/.venv/bin/dubsync2"
 RAW_DIR = Path("/opt/dubsync2/raw")
 OUT_DIR = Path("/opt/dubsync2/out")
 
+# A hard backstop, not a normal-case limit. A real stage can legitimately go
+# quiet for many minutes (stage3 in particular), so this only trips on total
+# silence — no output at all — for this long, which is what "hung" actually
+# looks like. The Demon City proxy sat silent for 4.5+ hours before this
+# existed; nothing should ever again be allowed to do that unnoticed.
+STALL_TIMEOUT_S = 1800
+
 # Stage weights measured on real runs (2h09 episode, 8 cores). They only need
 # to be roughly right — their job is to keep the bar honest, not exact.
 STAGES: list[tuple[str, str, float]] = [
@@ -43,9 +50,16 @@ STAGES: list[tuple[str, str, float]] = [
     ("stage2",    "✅ Verifying every shot",  0.22),
     ("stage3",    "🩹 Healing mismatches",    0.08),
     ("stage3-5",  "🔎 Global search",         0.04),
-    ("render",    "🎬 Rendering",             0.24),
-    ("dedupe",    "🧹 Removing repeats",      0.04),
+    ("plan",      "🧩 Building the cut",      0.02),
+    ("repair",    "🧹 Removing repeats",      0.08),   # expands into cycles
+    ("render",    "🎬 Rendering",             0.18),
 ]
+
+# How hard to chase duplication before accepting what is left.
+REPAIR_PASSES = 4        # convergence measured at 4 on a 2h27m feature
+REPAIR_TARGET_S = 5.0    # clean enough — stop
+REPAIR_MIN_GAIN_S = 1.0  # a pass that buys less than this is not worth another
+
 
 
 @dataclass
@@ -61,11 +75,147 @@ def _slug(name: str) -> str:
     return (s or "job")[:24]
 
 
-def prepare_inputs(hd_src: Path, dub_src: Path, title: str) -> tuple[Path, Path]:
+SLOW_CODECS = {"hevc", "vp9", "av1"}
+
+
+async def _needs_proxy(src: Path) -> tuple[bool, str]:
+    """True when decoding this file repeatedly would dominate the job.
+
+    HEVC/VP9/AV1, and any 10-bit pixel format, are far slower to seek and decode
+    on CPU than H.264 8-bit. Demon City (HEVC Main 10, 1080p) spent 8+ hours in
+    a stage that takes 3 minutes on an H.264 master.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,pix_fmt",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(src),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await proc.communicate()
+    parts = [x.strip() for x in out.decode("utf-8", "replace").split() if x.strip()]
+    codec = parts[0] if parts else ""
+    pix = parts[1] if len(parts) > 1 else ""
+    if codec in SLOW_CODECS:
+        return True, f"{codec}"
+    if "10le" in pix or "10be" in pix or "12le" in pix:
+        return True, f"{codec} {pix}"
+    return False, codec
+
+
+async def _make_proxy(src: Path, dst: Path, height: int,
+                      on_line=None, on_progress=None) -> bool:
+    """One sequential transcode to H.264 8-bit. Returns True on success.
+
+    Spawned with asyncio's own subprocess machinery, like every other stage
+    in this file — never the blocking `subprocess` module. Mixing the two in
+    one asyncio process is a known way to end up with a permanently zombied
+    ffmpeg: the blocking call's own wait() can lose the race for the child's
+    exit status and simply never come back, silently freezing the job for
+    hours (this is exactly what happened to the Demon City run).
+    """
+    # Resolve the target height in Python rather than with an ffmpeg min()
+    # expression — the comma inside it has to be escaped for the filtergraph
+    # parser, which is easy to get subtly wrong. Duration is fetched here too
+    # so progress below can be reported as a real percentage.
+    r0 = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=height", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(src),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out0, _ = await r0.communicate()
+    vals = [x.strip() for x in out0.decode("utf-8", "replace").split() if x.strip()]
+    try:
+        src_h = int(float(vals[0])) if vals else 0
+    except (ValueError, IndexError):
+        src_h = 0
+    try:
+        dur = float(vals[1]) if len(vals) > 1 else 0.0
+    except (ValueError, IndexError):
+        dur = 0.0
+    tgt = min(height, src_h) if src_h else height
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-stats",
+        "-i", str(src),
+        "-map", "0:v:0", "-map", "0:a?",
+        "-vf", f"scale=-2:{tgt}:flags=bicubic,format=yuv420p",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+        "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+        "-movflags", "+faststart",
+        str(dst),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+
+    # ffmpeg's -stats writes "time=HH:MM:SS.xx" updates with \r, not \n, so
+    # this reads raw chunks rather than lines and regexes the rolling buffer
+    # — line-based iteration would just sit there buffering until EOF.
+    pat_time = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+    buf = ""
+    last_pct = -1.0
+    stalled = False
+    assert proc.stdout is not None
+    while True:
+        try:
+            chunk = await asyncio.wait_for(proc.stdout.read(4096),
+                                           timeout=STALL_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            stalled = True
+            break
+        if not chunk:
+            break
+        buf += chunk.decode("utf-8", "replace")
+        buf = buf[-4000:]
+        if on_progress and dur > 0:
+            matches = pat_time.findall(buf)
+            if matches:
+                h, mnt, s = matches[-1]
+                cur = int(h) * 3600 + int(mnt) * 60 + float(s)
+                pct = min(1.0, cur / dur)
+                if pct - last_pct >= 0.01:
+                    last_pct = pct
+                    res = on_progress(pct)
+                    if asyncio.iscoroutine(res):
+                        await res
+    if stalled:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        await proc.wait()
+        if on_line:
+            on_line(f"proxy stalled — no output for {STALL_TIMEOUT_S // 60} min, "
+                    "killed; using the original")
+        dst.unlink(missing_ok=True)
+        return False
+    rc = await proc.wait()
+    if rc != 0 or not dst.exists() or dst.stat().st_size == 0:
+        if on_line:
+            tail = buf.strip().replace("\r", " ").splitlines()
+            snippet = tail[-1][-300:] if tail else ""
+            on_line(f"proxy failed (exit {rc}); using the original" +
+                    (f" — {snippet}" if snippet else ""))
+        dst.unlink(missing_ok=True)
+        return False
+    return True
+
+
+async def prepare_inputs(hd_src: Path, dub_src: Path, title: str,
+                         out_height: int = 1080, on_line=None,
+                         on_progress=None) -> tuple[Path, Path]:
     """Place the two files where the engine expects them.
 
     Hardlinked when possible so a 2 GB pair is not copied twice on a disk that
     has been near-full before.
+
+    A master in a slow codec (HEVC/VP9/AV1 or any 10-bit format) is transcoded
+    once to H.264 8-bit first — see `_needs_proxy`. Every later stage seeks and
+    decodes this file many times over, so paying once here is far cheaper than
+    paying per shot, per keyframe and per rendered segment.
+
+    `on_progress(label, pct_0_100)` mirrors `run_dubsync`'s callback so the
+    caller can drive the same panel through the proxy build instead of it
+    sitting silent — a multi-hour transcode with no feedback reads as "stuck"
+    even when it is working fine.
     """
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     hd = RAW_DIR / f"{title}_hd_ORIG{hd_src.suffix}"
@@ -77,6 +227,26 @@ def prepare_inputs(hd_src: Path, dub_src: Path, title: str) -> tuple[Path, Path]
             os.link(src, dst)
         except OSError:
             shutil.copy2(src, dst)
+
+    for who, path in (("HD", hd), ("dub", dub)):
+        slow, what = await _needs_proxy(path)
+        if not slow:
+            continue
+        prox = RAW_DIR / f"{title}_{'hd' if who == 'HD' else 'dub'}_PROXY.mp4"
+        if on_line:
+            on_line(f"{who} is {what} — building a fast proxy once")
+
+        async def _report(pct: float, who=who):
+            res = on_progress(f"🧬 Building {who} proxy", pct * 100.0)
+            if asyncio.iscoroutine(res):
+                await res
+
+        if await _make_proxy(path, prox, out_height, on_line,
+                             _report if on_progress else None):
+            if who == "HD":
+                hd = prox
+            else:
+                dub = prox
     return hd, dub
 
 
@@ -111,6 +281,7 @@ async def run_dubsync(
     brand_cfg: dict | None,
     width: int, height: int, crf: int,
     on_progress: Callable[[str, float], "asyncio.Future | None"],
+    bitrate_k: int = 0,
     max_accidental: float = 20.0,
     register: Optional[Callable[[object], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
@@ -125,7 +296,19 @@ async def run_dubsync(
     base = [DUBSYNC]
     render = [*base, "preview", "--title", title,
               "--width", str(width), "--height", str(height),
-              "--crf", str(crf), "--output-name", out_name]
+              # The dub is the editorial reference: the film starts where the
+              # dub's film starts, and anything the dub cut stays cut. The HD
+              # intro violates both -- it prepends HD head material (censor
+              # certificate, disclaimers) that the dub deliberately removed.
+              "--no-hd-intro",
+              "--output-name", out_name]
+    # A target bitrate keeps the delivered size close to what the panel quoted.
+    # CRF with -preset ultrafast does not: it pins quality and lets the bitrate
+    # run, which is how a 1.6 GB estimate came back as a 5.35 GB file.
+    if bitrate_k:
+        render += ["--bitrate", f"{int(bitrate_k)}k"]
+    else:
+        render += ["--crf", str(crf)]
     if brand_path:
         render += ["--brand-config", str(brand_path)]
 
@@ -136,13 +319,18 @@ async def run_dubsync(
         "stage2":    [*base, "stage2", "--title", title],
         "stage3":    [*base, "stage3", "--title", title],
         "stage3-5":  [*base, "stage3-5", "--title", title],
-        "render":    render,
+        # Same render invocation twice: once to lay out the cut and write
+        # provenance.json (no encoding), then -- after dedupe has used that
+        # provenance to verify its repairs -- once for real. The repairs are
+        # read back from dedupe_fixes.json during the second call.
+        "plan":      [*render, "--plan-only"],
         "dedupe":    [*base, "dedupe", "--title", title],
+        "render":    render,
     }
 
     stats: dict = {}
     done_weight = 0.0
-    total_weight = sum(w for _, _, w in STAGES)
+    total_weight = sum(w for _, _, w in STAGES)   # "repair" counted once
 
     # progress markers inside a stage's own output
     pat_frac = re.compile(r"\[\s*(\d+)\s*/\s*(\d+)\s*\]")
@@ -155,7 +343,27 @@ async def run_dubsync(
     def _cancelled() -> bool:
         return bool(should_cancel and should_cancel())
 
-    for key, label, weight in STAGES:
+    # Expand "repair" into alternating dedupe / re-plan cycles. Each cycle is
+    # weighted evenly so the bar keeps moving through them; unused cycles hand
+    # their weight back when the loop exits early.
+    queue: list[tuple[str, str, float]] = []
+    for k, l, w in STAGES:
+        if k != "repair":
+            queue.append((k, l, w))
+            continue
+        each = w / (REPAIR_PASSES * 2)
+        for i in range(REPAIR_PASSES):
+            queue.append(("dedupe", f"{l} ({i + 1}/{REPAIR_PASSES})", each))
+            queue.append(("plan", f"🧩 Rebuilding the cut ({i + 1})", each))
+
+    prev_acc: float | None = None
+
+    i = -1
+    while True:
+        i += 1
+        if i >= len(queue):
+            break
+        key, label, weight = queue[i]
         if _cancelled():
             return DubResult(False, None, "cancelled", stats)
         cmd = cmds[key]
@@ -167,9 +375,26 @@ async def run_dubsync(
         if register:
             register(proc)
         assert proc.stdout is not None
+        # Announce the stage immediately. Some stages (stage3 in particular)
+        # run for minutes before printing anything parseable, so the panel
+        # kept showing the PREVIOUS stage's label the whole time — which is
+        # exactly what reads as a frozen job even though the process is busy.
+        res = on_progress(label, done_weight / total_weight * 100.0)
+        if asyncio.iscoroutine(res):
+            await res
         inner = 0.0
         last_emit = 0.0
-        async for raw in proc.stdout:
+        tail: list[str] = []
+        stalled = False
+        while True:
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(),
+                                             timeout=STALL_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                stalled = True
+                break
+            if not raw:
+                break
             if _cancelled():
                 try:
                     proc.kill()
@@ -177,6 +402,11 @@ async def run_dubsync(
                     pass
                 return DubResult(False, None, "cancelled", stats)
             line = raw.decode("utf-8", "replace")
+            stripped = line.strip()
+            if stripped:
+                tail.append(stripped)
+                if len(tail) > 12:
+                    tail.pop(0)
             m = pat_frac.search(line)
             if m:
                 cur, tot = int(m.group(1)), int(m.group(2))
@@ -199,17 +429,58 @@ async def run_dubsync(
                 res = on_progress(label, pct)
                 if asyncio.iscoroutine(res):
                     await res
+        if stalled:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            await proc.wait()
+            if register:
+                register(None)
+            return DubResult(
+                False, None,
+                f"{label} produced no output for {STALL_TIMEOUT_S // 60} min "
+                "— killed as hung", stats)
         rc = await proc.wait()
         if register:
             register(None)
         if _cancelled():
             return DubResult(False, None, "cancelled", stats)
         if rc != 0:
-            return DubResult(False, None, f"{label} failed (exit {rc})", stats)
+            # Previously this discarded the engine's own output entirely, so
+            # every failure showed up in Telegram as a bare "(exit 1)" with
+            # no way to tell what actually went wrong without SSHing in.
+            detail = " › ".join(tail[-4:])
+            msg = f"{label} failed (exit {rc})"
+            if detail:
+                msg += f"\n{detail[:500]}"
+            return DubResult(False, None, msg, stats)
         done_weight += weight
         res = on_progress(label, done_weight / total_weight * 100.0)
         if asyncio.iscoroutine(res):
             await res
+
+        # A re-plan just told us how much duplication survives. Stop cycling
+        # once the cut is clean enough, or once a pass stops paying for itself
+        # (the residue is repairs that failed verification and were rolled
+        # back to protect lip sync — more passes will not move them).
+        if key == "plan" and "duplication" in stats:
+            try:
+                acc = float(str(stats["duplication"]).rstrip("s"))
+            except ValueError:
+                acc = None
+            if acc is not None:
+                gain = None if prev_acc is None else prev_acc - acc
+                prev_acc = acc
+                if acc <= REPAIR_TARGET_S or (gain is not None
+                                              and gain < REPAIR_MIN_GAIN_S):
+                    # Hand the skipped cycles their weight back so the bar
+                    # still reaches 100% rather than jumping.
+                    for j in range(i + 1, len(queue)):
+                        if queue[j][0] not in ("dedupe", "plan"):
+                            break
+                        done_weight += queue[j][2]
+                        i = j
 
     out = OUT_DIR / out_name
     if not out.exists():

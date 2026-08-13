@@ -280,18 +280,48 @@ def _premium_session() -> str | None:
 
 
 async def _premium_send(out_path: str, caption: str, duration: int,
-                        w: int, h: int) -> None:
-    """Upload via the owner's logged-in PREMIUM account (up to 4GB) -> the
-    owner's Saved Messages (the bot itself can't send >2GB)."""
+                        w: int, h: int, target_uid: int | None = None,
+                        progress=None) -> str:
+    """Upload via the logged-in PREMIUM account (up to 4GB) and hand the result
+    to `target_uid`.
+
+    The bot cannot upload >2GB itself, and the premium USER account cannot
+    message an arbitrary user id it has never spoken to — that raises
+    PEER_ID_INVALID, which is why this used to dead-end in the premium
+    account's own Saved Messages.
+
+    A bot, however, is always resolvable by username, and `copy_message`
+    re-sends an EXISTING file rather than uploading a new one, so the bot's
+    upload ceiling does not apply. The premium account therefore uploads into
+    the bot's DM, and the bot copies it to whoever asked for the job.
+
+    Returns a short description of where it ended up, for the status message.
+    """
     sess = _premium_session()
     pu = Client("premium_up", api_id=settings.api_id, api_hash=settings.api_hash,
                 session_string=sess, in_memory=True, no_updates=True)
     await pu.start()
     try:
-        await pu.send_video("me", out_path, caption=caption, duration=duration,
-                            width=w, height=h, supports_streaming=True)
+        me_bot = await app.get_me()
+        dest = me_bot.username or "me"
+        sent = await pu.send_video(dest, out_path, caption=caption,
+                                   duration=duration, width=w, height=h,
+                                   supports_streaming=True, progress=progress)
+        prem_me = await pu.get_me()
     finally:
         await pu.stop()
+
+    if target_uid and sent is not None:
+        try:
+            # Copy, not forward: no "forwarded from" header on the user's copy.
+            await app.copy_message(chat_id=target_uid,
+                                   from_chat_id=prem_me.id,
+                                   message_id=sent.id)
+            return "your chat"
+        except Exception as e:
+            log.warning("premium->user copy failed: %s", e)
+            return f"the premium account's Saved Messages (copy failed: {str(e)[:60]})"
+    return "the premium account's Saved Messages"
 
 
 # ----------------------------------------------------------------- estimate
@@ -300,6 +330,27 @@ def _effective_bitrate(c: dict, dur: float) -> tuple[int, str]:
         vk = bitrate_for_target(dur, int(c["size_target_gb"] * 1024 ** 3), c["audio_k"])
         return vk, f"{vk}k (auto → {c['size_target_gb']:g} GB)"
     return c["bitrate"], f"{c['bitrate']}k"
+
+
+def _fit_bitrate(vk: int, dur: float, audio_k: int) -> tuple[int, str]:
+    """Reduce `vk` only as far as needed for the file to fit the delivery cap.
+
+    Never raises the bitrate: the user setting is the ceiling. Returns the
+    bitrate to use plus a short note when it had to be trimmed.
+    """
+    if dur <= 0 or vk <= 0:
+        return vk, ""
+    cap = PREMIUM_LIMIT if _premium_session() else TG_LIMIT
+    if estimate_size_bytes(dur, vk, audio_k) <= cap:
+        return vk, ""
+    # 7% headroom, not a guess: x264 with -maxrate/-bufsize overshoots the
+    # nominal bitrate slightly and the HD intro adds seconds the estimate does
+    # not model. Measured on Lenin, a 1714k target landed at 1.942 GiB against
+    # a 1.95 GiB cap -- inside, but by 8 MB. 0.93 puts it near 1.85 GiB.
+    fit = bitrate_for_target(dur, int(cap * 0.93), audio_k)
+    if fit >= vk:
+        return vk, ""
+    return fit, f" → {fit}k to fit Telegram"
 
 
 def _fmt_hms(s: float) -> str:
@@ -1034,22 +1085,57 @@ class _DubProgress:
         self.pct = {k: 0.0 for k, _ in self.PHASES}
         self.note = {k: "" for k, _ in self.PHASES}
         self.stage_label = ""
+        self.active = ""        # phase currently running, even at 0%
         self.started = time.time()
+        # Trailing samples of (timestamp, overall%) for a windowed rate. A
+        # single average since start cannot survive stages whose real cost
+        # varies with what is cached.
+        self._samples: list[tuple[float, float]] = []
         self._thr = _Throttle()
         self._last = ""
 
     def overall(self) -> float:
         return sum(self.pct[k] * self.WEIGHT[k] for k, _ in self.PHASES)
 
+    def _elapsed(self) -> str:
+        el = int(time.time() - self.started)
+        return f"{el // 60}m {el % 60:02d}s" if el >= 60 else f"{el}s"
+
     def _eta(self) -> str:
+        """Elapsed always; a projection only once the bar means something.
+
+        Below 10% the sample is too short to extrapolate from — that is what
+        produced "~8 min left" on a job with 40 minutes to run.
+        """
+        now = time.time()
         done = self.overall()
-        if done < 3:
-            return "estimating…"
-        el = time.time() - self.started
-        left = el * (100 - done) / done
+        base = f"⏱ {self._elapsed()} elapsed"
+
+        # Keep ~6 minutes of history, sampled sparsely.
+        if not self._samples or now - self._samples[-1][0] >= 20:
+            self._samples.append((now, done))
+            cutoff = now - 360
+            while len(self._samples) > 2 and self._samples[0][0] < cutoff:
+                self._samples.pop(0)
+
+        # No rate for the thing currently running means no honest projection:
+        # with both downloads done the bar reads 28% before the engine has
+        # emitted a single number, and extrapolating that is how "~8 min left"
+        # appeared on a job with forty minutes to run.
+        if done < 10 or (self.active and self.pct.get(self.active, 0.0) <= 0.0):
+            return base
+
+        t0, p0 = self._samples[0]
+        span, gained = now - t0, done - p0
+        if span < 45 or gained <= 0.05:
+            # Either too little history, or the bar has stalled — a stalled bar
+            # cannot produce a number, and guessing is what caused the "~2 min
+            # left" that sat there for twenty minutes.
+            return base
+        left = (100 - done) * span / gained
         if left < 90:
-            return f"~{int(left)}s left"
-        return f"~{int(left // 60)} min left"
+            return f"{base} · ~{int(left)}s left"
+        return f"{base} · ~{int(left // 60)} min left"
 
     def _render(self) -> str:
         rows = []
@@ -1058,7 +1144,9 @@ class _DubProgress:
             extra = f"  {self.note[key]}" if self.note[key] else ""
             if v >= 100:
                 rows.append(f"✅ {label}{extra}")
-            elif v > 0:
+            elif v > 0 or key == self.active:
+                # A started phase reads ⏳ even at 0% — `analyze` reports no
+                # numbers for its first ten minutes and must not look idle.
                 lbl = self.stage_label if key == "engine" and self.stage_label else label
                 rows.append(f"⏳ {lbl}\n`{_bar(v)}`{extra}")
             else:
@@ -1070,6 +1158,10 @@ class _DubProgress:
     async def set(self, key: str, pct: float, note: str = "",
                   label: str = "", force: bool = False):
         self.pct[key] = max(0.0, min(100.0, pct))
+        if self.pct[key] < 100:
+            self.active = key
+        elif self.active == key:
+            self.active = ""
         if note:
             self.note[key] = note
         if label:
@@ -1214,10 +1306,12 @@ def _dub_panel_text(uid: int) -> str:
     # its own intro/promo, which is only measurable after analysis.
     out_dur = ddur or hdur or 0.0
     vk, br_label = _effective_bitrate(c, out_dur) if out_dur else (0, "—")
+    vk, fit_note = _fit_bitrate(vk, out_dur, c["audio_k"])
+    br_label += fit_note
     est = estimate_size_bytes(out_dur, vk, c["audio_k"]) if out_dur else 0
     if est > TG_LIMIT:
         if _premium_session() and est <= PREMIUM_LIMIT:
-            deliver = "→ sent via your premium account"
+            deliver = "→ premium upload → **Saved Messages of the premium account**"
         elif delivery.mega_is_configured():
             deliver = "→ sent as a MEGA link"
         else:
@@ -1239,9 +1333,9 @@ def _dub_panel_text(uid: int) -> str:
         + f"📐 Output: {res} · {br_label}\n"
         + _dub_size_warning(msgs)
         + result
-        + "\n_The dub's own intro and closing promo are removed automatically "
-        "(so the result runs a little shorter); the HD intro is kept with its "
-        "own audio._\n"
+        + "\n_The dub's own intro and closing promo are removed automatically, so "
+        "the film starts exactly where the dub's film starts — nothing the dub "
+        "cut is added back._\n"
         "⚠️ Wrong way round? Tap **Swap**."
     )
 
@@ -1630,18 +1724,35 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         hd_job, dub_job = jobs[hd_i], jobs[1 - hd_i]
         hd_src, dub_src = Path(hd_job["src"]), Path(dub_job["src"])
         title = dubsync_job._slug(hd_job["name"])
-        hd, dub = await asyncio.to_thread(
-            dubsync_job.prepare_inputs, hd_src, dub_src, title)
-
+        # Settings first: the proxy is capped at the render height, so there is
+        # no point transcoding 1080p only to hand it to a 720p render.
         c = user_cfg(uid)
         ow = hd_job["w"] if c["width"] == 0 else c["width"]
         oh = hd_job["h"] if c["height"] == 0 else c["height"]
+
+        await prog.set("engine", 0, label="🎞 Preparing master", force=True)
+
         async def on_prog(label: str, pct: float):
             await prog.set("engine", pct, label=label)
 
+        # prepare_inputs now spawns ffmpeg/ffprobe with asyncio's own
+        # subprocess machinery (like every stage below already does) instead
+        # of the blocking `subprocess` module, so it runs directly here
+        # rather than via to_thread — mixing the two subprocess styles in one
+        # process is what left an HEVC proxy build permanently zombied.
+        hd, dub = await dubsync_job.prepare_inputs(
+            hd_src, dub_src, title, oh or 1080, log.info, on_prog)
+
+        # The same bitrate the confirm panel quoted, so the delivered size
+        # matches the estimate instead of ballooning under CRF + ultrafast.
+        # Output length tracks the dub, which is what the panel measured.
+        _dur = dub_job.get("duration") or 0.0
+        _vk, _ = _effective_bitrate(c, _dur)
+        _vk, _ = _fit_bitrate(_vk, _dur, c["audio_k"])
         res = await dubsync_job.run_dubsync(
             hd, dub, title, (_brand_payload(uid) if brand else None),
             width=ow, height=oh, crf=settings.x264_crf,
+            bitrate_k=_vk,
             on_progress=on_prog,
             register=lambda pr: _act(uid).__setitem__("proc", pr),
             should_cancel=lambda: bool(_act(uid).get("cancelled")))
@@ -1802,9 +1913,21 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
                                        supports_streaming=True, caption=cap, progress=_ulp)
             return True
         elif _premium_session() and sz <= PREMIUM_LIMIT:
-            await status.edit(f"⬆️ {human_size(sz)} — uploading via your premium account…")
-            await _premium_send(out, cap, int(odur), ow, oh)
-            await reply_to.reply(f"{cap}\n📥 Sent to your **Saved Messages** (premium account).")
+            put = _Throttle()
+
+            async def _pp(cur, tot):
+                if tot and put.ok(cur / tot * 100):
+                    try:
+                        await status.edit("⬆️ **Uploading via premium**\n"
+                                          f"`{_bar(cur / tot * 100)}`")
+                    except Exception:
+                        pass
+
+            await status.edit(f"⬆️ {human_size(sz)} — uploading via premium…")
+            where = await _premium_send(out, cap, int(odur), ow, oh,
+                                        target_uid=uid, progress=_pp)
+            if where != "your chat":
+                await reply_to.reply(f"{cap}\n📥 Sent to {where}.")
             return True
         elif delivery.mega_is_configured():
             await status.edit(f"☁️ {human_size(sz)} — uploading to MEGA…")

@@ -13,11 +13,51 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 
 RCLONE_CONF = "/app/data/rclone.conf"
 REMOTE = "megabidhaan"
 FOLDER = "BidhaanLogoEdit"
 RCLONE = shutil.which("rclone") or "/usr/local/bin/rclone"
+
+# How long a download/upload is allowed to go with zero progress lines before
+# it's treated as dead and killed. These read loops block on the child's
+# stdout with no timeout of their own, so a stalled peer (dead MEGA session,
+# a stuck connection) would otherwise hang the job forever — the same failure
+# shape that once left a render silently stuck for 24+ hours.
+STALL_TIMEOUT_S = 1800
+
+
+class _StallWatchdog:
+    """Kills `proc` if `poke()` goes unanswered for `timeout_s` seconds.
+
+    subprocess.Popen has no wait_for-with-progress-reset equivalent, so this
+    uses a restartable timer on a daemon thread instead.
+    """
+
+    def __init__(self, proc: subprocess.Popen, timeout_s: float = STALL_TIMEOUT_S):
+        self._proc = proc
+        self._timeout_s = timeout_s
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+        self.poke()
+
+    def _fire(self) -> None:
+        if self._proc.poll() is None:
+            self._proc.kill()
+
+    def poke(self) -> None:
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(self._timeout_s, self._fire)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
 
 
 def _rclone(*args: str, timeout: int = 36000) -> subprocess.CompletedProcess:
@@ -69,19 +109,28 @@ def mega_download(link: str, dest: str, progress_cb=None, register=None) -> tupl
     if register:
         register(proc)
     assert proc.stdout is not None
+    watchdog = _StallWatchdog(proc)
     name = None
-    for line in proc.stdout:
-        # lines look like: "Movie.mp4: 10.93% - 243 MiB of 2.2 GiB (242 MiB/s)"
-        if name is None and ": " in line and "%" in line:
-            name = line.split(": ", 1)[0].strip()
-        mo = re.search(r"(\d+(?:\.\d+)?)%", line)
-        if mo and progress_cb:
-            try:
-                progress_cb(float(mo.group(1)))
-            except Exception:
-                pass
-    proc.wait()
+    try:
+        for line in proc.stdout:
+            watchdog.poke()
+            # lines look like: "Movie.mp4: 10.93% - 243 MiB of 2.2 GiB (242 MiB/s)"
+            if name is None and ": " in line and "%" in line:
+                name = line.split(": ", 1)[0].strip()
+            mo = re.search(r"(\d+(?:\.\d+)?)%", line)
+            if mo and progress_cb:
+                try:
+                    progress_cb(float(mo.group(1)))
+                except Exception:
+                    pass
+        proc.wait()
+    finally:
+        watchdog.cancel()
     if proc.returncode != 0:
+        if proc.returncode == -9:
+            raise RuntimeError(
+                f"MEGA download stalled — no progress for {STALL_TIMEOUT_S // 60} "
+                "min, killed")
         raise RuntimeError("MEGA download failed (megadl exit %d)" % proc.returncode)
     if not os.path.exists(dest) or os.path.getsize(dest) == 0:
         raise RuntimeError("MEGA download produced no file")
@@ -115,18 +164,27 @@ def mega_upload(path: str, name: str | None = None, progress_cb=None) -> str:
              "-P", "--stats", "2s", "--stats-one-line"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         assert proc.stdout is not None
+        watchdog = _StallWatchdog(proc)
         tail = []
-        for line in proc.stdout:
-            tail.append(line)
-            del tail[:-25]                       # keep only the last lines
-            mobj = re.search(r"(\d+)%", line)
-            if mobj:
-                try:
-                    progress_cb(float(mobj.group(1)))
-                except Exception:
-                    pass
-        proc.wait()
+        try:
+            for line in proc.stdout:
+                watchdog.poke()
+                tail.append(line)
+                del tail[:-25]                       # keep only the last lines
+                mobj = re.search(r"(\d+)%", line)
+                if mobj:
+                    try:
+                        progress_cb(float(mobj.group(1)))
+                    except Exception:
+                        pass
+            proc.wait()
+        finally:
+            watchdog.cancel()
         if proc.returncode != 0:
+            if proc.returncode == -9:
+                raise RuntimeError(
+                    f"MEGA upload stalled — no progress for {STALL_TIMEOUT_S // 60} "
+                    "min, killed")
             raise RuntimeError("MEGA upload failed: " + _friendly("".join(tail)))
     link = _rclone("link", dest, timeout=300)
     if link.returncode != 0:
