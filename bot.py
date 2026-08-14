@@ -1839,17 +1839,26 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         ow2, oh2, odur = await asyncio.to_thread(probe, str(res.path))
 
         # QA gate: "the pipeline exited 0" is not the same thing as "this is
-        # a good file." Two cheap, independent checks before anything is
-        # handed to the user as a finished product — a real duration drift
-        # (a dropped chunk that somehow got past the render's own hard-fail
-        # on missing segments) and a full decode-through (catches a corrupt
-        # segment or a bad concat join that a duration check alone would
-        # miss, since it doesn't change the runtime).
+        # a good file." Three independent checks before anything is handed
+        # to the user as a finished product.
+        #
+        # The third one closes a real gap: dubsync_job.py already runs the
+        # engine's own Timeline Integrity Layer after every render — it
+        # samples the ACTUAL rendered frames (not just the edit plan) and
+        # can genuinely detect leftover accidental duplication — and it was
+        # correctly reporting "RELEASE HELD" on real jobs. But run_dubsync
+        # returns ok=True regardless of the gate's verdict (by design: "the
+        # movie exists, it just could not be proven clean" — see its own
+        # comment), so this is the one place that was ever going to notice.
+        # It never did, until now: two consecutive real renders shipped with
+        # "integrity gate: held" sitting unenforced in the caption text
+        # while the file went out anyway.
         expected = res.stats.get("expected_duration_s")
         tol = max(5.0, (expected or 0) * 0.005)
         dur_bad = bool(expected) and odur > 0 and abs(odur - expected) > tol
         ok_decode, decode_err = await asyncio.to_thread(verify_decodable, str(res.path))
-        if dur_bad or not ok_decode:
+        gate_held = res.stats.get("gate") == "held"
+        if dur_bad or not ok_decode or gate_held:
             os.makedirs(OUTBOX, exist_ok=True)
             qa_saved = os.path.join(
                 OUTBOX,
@@ -1860,11 +1869,14 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                 reasons.append(f"duration {odur:.1f}s vs expected {expected:.1f}s")
             if not ok_decode:
                 reasons.append(f"decode error: {decode_err[-200:]}")
+            if gate_held:
+                notes = "; ".join((res.stats.get("gate_notes") or [])[:3])
+                reasons.append(f"integrity gate held{': ' + notes if notes else ''}")
             log.error("QA gate failed for %s: %s", title, "; ".join(reasons))
             return await status.edit(
                 "⚠️ **Render finished but failed the quality check** — not "
                 "auto-delivered, so a broken file doesn't land in your chat "
-                f"unannounced.\n`{'; '.join(reasons)[:300]}`\n\n"
+                f"unannounced.\n`{'; '.join(reasons)[:400]}`\n\n"
                 f"Saved at `{qa_saved}` if you want to inspect it yourself "
                 "— otherwise just retry.")
 
