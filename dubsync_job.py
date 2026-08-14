@@ -21,6 +21,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -71,8 +72,31 @@ class DubResult:
 
 
 def _slug(name: str) -> str:
-    s = re.sub(r"[^A-Za-z0-9]+", "", Path(name).stem).lower()
-    return (s or "job")[:24]
+    """Turn a filename into the title used for raw/{title}_hd_ORIG.* and,
+    transitively, the whole per-title cache.
+
+    2026-08-14 incident: two DIFFERENT movies uploaded from the same channel
+    ("[ @BT_MOVIES_HD ][ @FILMSCLUB04 ] <title>...") both slugified to the
+    identical "btmovieshdfilmsclub04aak" -- the bracketed channel tag alone
+    ate the whole 24-char budget, leaving only 3 characters of the real
+    title to tell them apart. Since prepare_inputs() unconditionally
+    overwrites raw/{title}_hd_ORIG.* on every submission, the second
+    movie's raw source silently destroyed the first's, and its cached
+    shots/embeddings got reused against the wrong video entirely.
+
+    Fix: strip bracketed uploader/channel tags before slugifying (so the
+    real title drives the slug instead of being crowded out), then append a
+    short hash of the FULL original name as a disambiguator. Two different
+    movies now can't collide even if their titles also happen to share a
+    long common prefix; the identical filename resubmitted (a legitimate
+    retry) still hashes to the identical slug and correctly reuses cached
+    work instead of redownloading and reprocessing from scratch.
+    """
+    stem = Path(name).stem
+    detagged = re.sub(r"\[[^\]]*\]", "", stem)
+    core = re.sub(r"[^A-Za-z0-9]+", "", detagged).lower()[:18]
+    h = hashlib.sha1(name.encode("utf-8", "replace")).hexdigest()[:6]
+    return f"{core or 'job'}_{h}"
 
 
 SLOW_CODECS = {"hevc", "vp9", "av1"}
