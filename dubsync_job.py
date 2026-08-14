@@ -296,11 +296,19 @@ async def run_dubsync(
     base = [DUBSYNC]
     render = [*base, "preview", "--title", title,
               "--width", str(width), "--height", str(height),
-              # The dub is the editorial reference: the film starts where the
-              # dub's film starts, and anything the dub cut stays cut. The HD
-              # intro violates both -- it prepends HD head material (censor
-              # certificate, disclaimers) that the dub deliberately removed.
-              "--no-hd-intro",
+              # STANDING RULE (John): the dub source's own intro (channel
+              # bumpers, dubber branding, promo cards -- material that only
+              # ever existed in the dub, never in the source film) is always
+              # cut, picture and audio. The HD master's OWN intro (its real
+              # distributor slate, censor certificate, studio logos -- part
+              # of the actual film release) is kept, with the HD's own
+              # original, unmuted audio. A prior session force-added
+              # --no-hd-intro here reasoning that ANY HD head material
+              # violates "the dub is the editorial reference" -- that
+              # conflated the two categories and silently dropped the HD's
+              # legitimate intro from every render since. The engine's own
+              # default (--hd-intro, on) already matches the standing rule;
+              # this just stops overriding it.
               "--output-name", out_name]
     # A target bitrate keeps the delivered size close to what the panel quoted.
     # CRF with -preset ultrafast does not: it pins quality and lets the bitrate
