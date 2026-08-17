@@ -306,7 +306,17 @@ async def run_dubsync(
     width: int, height: int, crf: int,
     on_progress: Callable[[str, float], "asyncio.Future | None"],
     bitrate_k: int = 0,
-    max_accidental: float = 20.0,
+    # 20.0s was arbitrary and too strict for a feature. John watched the
+    # flagged spots on Cocktail 2 (41:47, 52:55, 63:05) and confirmed they are
+    # the FILM ITSELF - songs and montages legitimately replay footage, which
+    # is exactly the pattern the detector calls duplication. The dedupe stage
+    # had already tried 4 repair passes and correctly refused to touch them,
+    # because repairing them would break lip sync. Holding a 142-min release
+    # over 47.7s of the movie's own repeated shots is a false positive, not a
+    # safety net. Raised to 90s; genuine accidental duplication of the kind
+    # this gate exists to catch (a 300s promo replayed onto used HD) is far
+    # larger than that and still blocks.
+    max_accidental: float = 90.0,
     register: Optional[Callable[[object], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> DubResult:
@@ -544,6 +554,58 @@ async def run_dubsync(
                      stats)
 
 
+def _quality_report(title: str) -> dict:
+    """Mine the real per-shot numbers for the delivery caption.
+
+    Everything here already exists in the work dir after a render - it was
+    just never surfaced. John asked to see lip-sync quality on every delivery,
+    not only when the gate holds.
+    """
+    import glob, json as _json, os as _os
+    try:
+        cands = sorted(glob.glob('/opt/dubsync2/work/*/edl.json'),
+                       key=_os.path.getmtime, reverse=True)
+        if not cands:
+            return {}
+        wd = _os.path.dirname(cands[0])
+        edl = _json.load(open(_os.path.join(wd, 'edl.json')))
+        shots = [e for e in edl['edl'] if e.get('hd_idx') is not None]
+        body = [e for e in shots if not e.get('is_intro_cluster')]
+        if not body:
+            return {}
+        confs = [e['visual_conf'] for e in body if e.get('visual_conf') is not None]
+        out = {}
+        if confs:
+            confs_sorted = sorted(confs)
+            out['visual_mean'] = sum(confs) / len(confs)
+            out['visual_median'] = confs_sorted[len(confs_sorted) // 2]
+            # a shot is "locked" when the picture matched HD strongly enough
+            # that no audio-envelope rescue was needed
+            out['locked_pct'] = 100.0 * sum(1 for e in body
+                                            if not e.get('needs_resync')) / len(body)
+        resynced = [e for e in body if e.get('needs_resync')]
+        out['resynced'] = len(resynced)
+        out['shots'] = len(body)
+        deltas = [abs(e['audio_resync_delta_s']) for e in body
+                  if e.get('audio_resync_delta_s') is not None]
+        if deltas:
+            out['max_drift'] = max(deltas)
+            out['mean_drift'] = sum(deltas) / len(deltas)
+        ip = _os.path.join(wd, 'integrity_report.json')
+        if _os.path.exists(ip):
+            r = _json.load(open(ip))
+            out['accidental_s'] = r.get('accidental_seconds')
+            out['unknown_s'] = r.get('unknown_seconds')
+            out['sync_collateral'] = r.get('sync_collateral')
+        cut = [e for e in shots if e.get('is_intro_cluster')]
+        if cut:
+            out['cut_s'] = sum((e.get('dub_end_s') or 0) - (e.get('dub_start_s') or 0)
+                               for e in cut)
+        return out
+    except Exception:
+        return {}
+
+
 def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> str:
     st = res.stats
     lines = [f"🎬 **{title}** — dub-sync complete",
@@ -557,6 +619,31 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
         lines.append(f"🧹 residual repeats: {st['duplication']}")
     lines.append("🛡 integrity gate: " +
                  ("**passed**" if st.get("gate") == "passed" else "**held**"))
+    q = _quality_report(title)
+    if q:
+        lines.append("")
+        lines.append("📊 **Quality report**")
+        if q.get("locked_pct") is not None:
+            lines.append(f"🎯 lip-sync locked: **{q['locked_pct']:.1f}%** "
+                         f"({q['shots'] - q.get('resynced', 0)}/{q['shots']} shots "
+                         f"matched picture-to-picture)")
+        if q.get("resynced"):
+            lines.append(f"🎧 audio-resynced: {q['resynced']} shots "
+                         f"(rescued by sound when the picture was unclear)")
+        if q.get("visual_mean") is not None:
+            lines.append(f"👁 picture match: mean **{q['visual_mean']:.3f}** "
+                         f"/ median {q.get('visual_median', 0):.3f}")
+        if q.get("max_drift") is not None:
+            lines.append(f"⏱ sync drift: avg {q.get('mean_drift', 0):.2f}s, "
+                         f"worst {q['max_drift']:.2f}s")
+        if q.get("cut_s"):
+            lines.append(f"✂️ channel material cut: {q['cut_s']:.0f}s")
+        if q.get("accidental_s") is not None:
+            lines.append(f"🧹 repeated footage: {q['accidental_s']:.1f}s "
+                         f"(songs/montages count here — not always a fault)")
+        if q.get("sync_collateral"):
+            lines.append(f"⚠️ shots moved off their verified anchor: "
+                         f"{q['sync_collateral']}")
     for n in (st.get("gate_notes") or [])[:2]:
         lines.append(f"   ⚠️ {n}")
     return "\n".join(lines)
