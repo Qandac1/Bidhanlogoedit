@@ -330,19 +330,17 @@ async def run_dubsync(
     base = [DUBSYNC]
     render = [*base, "preview", "--title", title,
               "--width", str(width), "--height", str(height),
-              # STANDING RULE (John): the dub source's own intro (channel
-              # bumpers, dubber branding, promo cards -- material that only
-              # ever existed in the dub, never in the source film) is always
-              # cut, picture and audio. The HD master's OWN intro (its real
-              # distributor slate, censor certificate, studio logos -- part
-              # of the actual film release) is kept, with the HD's own
-              # original, unmuted audio. A prior session force-added
-              # --no-hd-intro here reasoning that ANY HD head material
-              # violates "the dub is the editorial reference" -- that
-              # conflated the two categories and silently dropped the HD's
-              # legitimate intro from every render since. The engine's own
-              # default (--hd-intro, on) already matches the standing rule;
-              # this just stops overriding it.
+              # STANDING RULE (John, repeated many times): THE DUB IS THE
+              # EDITORIAL REFERENCE. The output starts EXACTLY where the dub's
+              # film starts and adds back NOTHING the dub cut. The dub removed
+              # the head material (channel bumpers AND the HD master's own
+              # distributor slate / censor card / studio logos), so none of it
+              # goes back in. A prior session flipped this to keep the HD intro
+              # ("--hd-intro" default on), which prepended ~3 min of the HD
+              # head -- censor cards, studio logos, with Hindi audio -- onto
+              # every render. That is exactly the long/Hindi intro John keeps
+              # reporting. --no-hd-intro restores the rule: start at the film.
+              "--no-hd-intro",
               "--output-name", out_name]
     # A target bitrate keeps the delivered size close to what the panel quoted.
     # CRF with -preset ultrafast does not: it pins quality and lets the bitrate
@@ -546,8 +544,13 @@ async def run_dubsync(
     released = "RELEASE APPROVED" in gate_out
     stats["gate"] = "passed" if released else "held"
     for ln in gate_out.splitlines():
-        if ln.strip().startswith("✗"):
-            stats.setdefault("gate_notes", []).append(ln.strip()[1:].strip())
+        s = ln.strip()
+        if s.startswith("✗"):
+            stats.setdefault("gate_notes", []).append(s[1:].strip())
+        elif s.startswith("🔁"):
+            # "where to check" lines from the integrity checker — surfaced to
+            # John so he can jump straight to each suspected repeat.
+            stats.setdefault("dup_regions", []).append(s)
 
     return DubResult(True, out,
                      "released" if released else "finished, but the gate held it",
