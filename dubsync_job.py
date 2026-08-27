@@ -553,7 +553,7 @@ async def run_dubsync(
             stats.setdefault("dup_regions", []).append(s)
 
     return DubResult(True, out,
-                     "released" if released else "finished, but the gate held it",
+                     "released" if released else "delivered for review — integrity gate FAILED (NOT final)",
                      stats)
 
 
@@ -611,8 +611,16 @@ def _quality_report(title: str) -> dict:
 
 def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> str:
     st = res.stats
-    lines = [f"🎬 **{title}** — dub-sync complete",
+    _passed = st.get("gate") == "passed"
+    _nblock = len(st.get("gate_notes") or [])
+    _head = "dub-sync complete" if _passed else "⚠️ dub-sync — NEEDS REVIEW (NOT final)"
+    lines = [f"🎬 **{title}** — {_head}",
              f"`{int(dur_s//3600)}h {int(dur_s%3600//60):02d}m` · {size_b/1e9:.2f} GB"]
+    if not _passed:
+        _bs = "s" if _nblock != 1 else ""
+        lines.append(f"⛔ **Integrity gate FAILED** — {_nblock} blocker{_bs}. Delivered "
+                     f"for manual review; this is NOT a finished master. Check the "
+                     f"🔁 spots below by eye (esp. the first ~90s and last ~90s).")
     if st.get("match_rate"):
         lines.append(f"✅ shot match: **{st['match_rate']}**")
     if st.get("intro_shots"):
@@ -621,11 +629,12 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
     if st.get("duplication"):
         lines.append(f"🧹 residual repeats: {st['duplication']}")
     lines.append("🛡 integrity gate: " +
-                 ("**passed**" if st.get("gate") == "passed" else "**held**"))
+                 ("✅ **passed**" if _passed
+                  else f"❌ **FAILED — release held** ({_nblock} blocker" + ("s" if _nblock != 1 else "") + ")"))
     q = _quality_report(title)
     if q:
         lines.append("")
-        lines.append("📊 **Quality report**")
+        lines.append("📊 **Quality report**" + ("" if _passed else " _(measured on a NOT-final cut)_"))
         if q.get("locked_pct") is not None:
             lines.append(f"🎯 lip-sync locked: **{q['locked_pct']:.1f}%** "
                          f"({q['shots'] - q.get('resynced', 0)}/{q['shots']} shots "
