@@ -598,6 +598,8 @@ def _quality_report(title: str) -> dict:
         if _os.path.exists(ip):
             r = _json.load(open(ip))
             out['accidental_s'] = r.get('accidental_seconds')
+            out['visible_s'] = r.get('visible_accidental_seconds')
+            out['benign_s'] = r.get('benign_reuse_seconds')
             out['unknown_s'] = r.get('unknown_seconds')
             out['sync_collateral'] = r.get('sync_collateral')
         cut = [e for e in shots if e.get('is_intro_cluster')]
@@ -650,7 +652,11 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
                          f"worst {q['max_drift']:.2f}s")
         if q.get("cut_s"):
             lines.append(f"✂️ channel material cut: {q['cut_s']:.0f}s")
-        if q.get("accidental_s") is not None:
+        if q.get("visible_s") is not None:
+            _bn = q.get("benign_s") or 0.0
+            lines.append(f"👁 visible repeats: {q['visible_s']:.1f}s"
+                         + (f"  ·  {_bn:.1f}s static reuse (invisible)" if _bn else ""))
+        elif q.get("accidental_s") is not None:
             lines.append(f"🧹 repeated footage: {q['accidental_s']:.1f}s "
                          f"(songs/montages count here — not always a fault)")
         if q.get("sync_collateral"):
