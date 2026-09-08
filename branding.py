@@ -56,6 +56,9 @@ class RenderConfig:
     logo_start: float = 0.0
     cover_start: float = 0.0
     text_start: float = 0.0
+    logo_end: float = 0.0
+    cover_end: float = 0.0
+    text_end: float = 0.0
 
     # output / encode (Wondershare-style)
     width: int = 1920
@@ -157,6 +160,9 @@ def build_filter(src_w: int, src_h: int, duration: float,
     fontsize = max(14, int(out_h * cfg.caption_scale))
     S_logo = max(0.0, cfg.logo_start)
     S_text = max(0.0, cfg.text_start)   # per-element start (skip intro)
+    _BIG = 1e9
+    E_logo = cfg.logo_end if (cfg.logo_end or 0) > 0 else (duration if duration > 0 else _BIG)
+    E_text = cfg.text_end if (cfg.text_end or 0) > 0 else (duration if duration > 0 else _BIG)
 
     # skip the scale entirely when output == source (saves a full rescale pass)
     if out_w == src_w and out_h == src_h:
@@ -190,7 +196,7 @@ def build_filter(src_w: int, src_h: int, duration: float,
         parts.append(f"[{in_i}:v]format=rgba,scale={lw}:-1[lg{idx}]")
         nxt = f"wl{idx}"
         parts.append(f"[{cur}][lg{idx}]overlay={_corner_xy(lg.corner, mx, my)}"
-                     f":format=auto:enable='gte(t,{S_logo:.2f})'[{nxt}]")
+                     f":format=auto:enable='between(t,{S_logo:.2f},{E_logo:.2f})'[{nxt}]")
         cur = nxt
 
     # scrolling caption (bottom -> up over scroll_seconds).
@@ -209,7 +215,7 @@ def build_filter(src_w: int, src_h: int, duration: float,
             parts.append(
                 f"[{cur}]{base}:"
                 f"y='h-((t-{start:.2f})/{T:.3f})*(h+text_h)':"
-                f"enable='between(t,{start:.2f},{start + T:.2f})'[{lbl}]")
+                f"enable='between(t,{start:.2f},{min(start + T, E_text):.2f})'[{lbl}]")
             cur = lbl
     else:
         # N appearances evenly spread across the video AFTER the intro (S_text).
@@ -219,7 +225,7 @@ def build_filter(src_w: int, src_h: int, duration: float,
         parts.append(
             f"[{cur}]{base}:"
             f"y='h-(mod(t-{S_text:.2f},{period:.3f})/{T:.3f})*(h+text_h)':"
-            f"enable='gte(t,{S_text:.2f})*lt(mod(t-{S_text:.2f},{period:.3f}),{T:.3f})'[outv]")
+            f"enable='gte(t,{S_text:.2f})*lt(t,{E_text:.2f})*lt(mod(t-{S_text:.2f},{period:.3f}),{T:.3f})'[outv]")
     return ";".join(parts)
 
 
@@ -237,6 +243,14 @@ def render(video: str, out_path: str, events: list[CoverEvent],
             if e.end <= cfg.cover_start:
                 continue
             gated.append(CoverEvent(max(e.start, cfg.cover_start), e.end,
+                                    e.x, e.y, e.w, e.h, e.digits))
+        events = gated
+    if (cfg.cover_end or 0) > 0:
+        gated = []
+        for e in events:
+            if e.start >= cfg.cover_end:
+                continue
+            gated.append(CoverEvent(e.start, min(e.end, cfg.cover_end),
                                     e.x, e.y, e.w, e.h, e.digits))
         events = gated
     fc = build_filter(src_w, src_h, dur, events, cfg)

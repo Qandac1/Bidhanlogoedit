@@ -143,6 +143,9 @@ DEFAULTS = {
     "logo_start_min": 0.0,
     "cover_start_min": 0.0,
     "text_start_min": 0.0,
+    "logo_end_min": 0.0,
+    "cover_end_min": 0.0,
+    "text_end_min": 0.0,
     "cover_mode": "auto",        # auto | off
     "width": 1920, "height": 1080, "fps": 25,
     "bitrate": 2000,             # kbps (video)
@@ -244,6 +247,35 @@ def _asset(name: str) -> str:
 
 LOGO_DIR = os.path.join(DATA_DIR, "user_logos")
 _awaiting_logo: set[int] = set()   # uids who ran /logo and owe us an image
+_awaiting_time: dict = {}          # uid -> {key,msg,job} while typing a start/end
+
+_TIME_LABELS = {
+    "logo_start_min": "Logo start", "logo_end_min": "Logo end",
+    "cover_start_min": "Banner-cover start", "cover_end_min": "Banner-cover end",
+    "text_start_min": "Caption start", "text_end_min": "Caption end",
+}
+
+
+def _timelabel(key: str) -> str:
+    return _TIME_LABELS.get(key, key)
+
+
+async def _handle_time_input(m: Message, uid: int) -> None:
+    info = _awaiting_time.get(uid) or {}
+    key = info.get("key")
+    mins = _parse_time_min(m.text)
+    if mins is None:
+        return await m.reply("Couldn't read that. Try `30s`, `1:23`, `1:57:00`, `2m`, or `0` = off/full.")
+    set_user(uid, **{key: mins})
+    _awaiting_time.pop(uid, None)
+    val = "off / full length" if mins <= 0 else _fmt_time(mins)
+    await m.reply(f"✅ {_timelabel(key)} set to **{val}**.")
+    msg, job = info.get("msg"), info.get("job")
+    if msg is not None:
+        try:
+            await msg.edit_reply_markup(submenu("starts", uid, job))
+        except Exception:
+            pass
 
 
 def _user_logo(c: dict) -> str:
@@ -482,22 +514,34 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
                  for f in (24, 25, 30)]]
         return IKM(rows + [_back_row()])
     if which == "starts":
-        # let John pick the minute each element starts (so an intro stays clean
-        # until then). 0 = from the very start.
+        # Quick MINUTE presets for start (kept) + ✏️ type-exact for start AND
+        # end (30s / 1:23 / 1:57:00) + Full-length end reset. 0 = from start / no end.
         mins = [0, 1, 2, 3, 5]
 
         def _lbl(m):
             return "Off" if m == 0 else f"{m}m"
 
-        def _row(key):
+        def _prow(key):
             return [IKB(("✅ " if abs(c.get(key, 0.0) - m) < 0.01 else "") + _lbl(m),
                         f"s:{key}:{m}") for m in mins]
-        rows = [
-            [IKB("🏷 Bidhaan logo starts at:", "noop")], _row("logo_start_min"),
-            [IKB("🟥 Banner cover starts at:", "noop")], _row("cover_start_min"),
-            [IKB("📝 Caption starts at:", "noop")], _row("text_start_min"),
-            _back_row(),
-        ]
+
+        def _cur(skey, ekey):
+            sv, ev = c.get(skey, 0.0), c.get(ekey, 0.0)
+            return f"{(_fmt_time(sv) if sv > 0 else 'start')}  →  {(_fmt_time(ev) if ev > 0 else 'end of film')}"
+
+        def _block(name, skey, ekey):
+            return [
+                [IKB(f"{name}:  {_cur(skey, ekey)}", "noop")],
+                _prow(skey),
+                [IKB("✏️ Start", f"tset:{skey}"),
+                 IKB("✏️ End", f"tset:{ekey}"),
+                 IKB(("✅ Full" if not c.get(ekey, 0.0) else "Full length"), f"tfull:{ekey}")],
+            ]
+        rows = []
+        rows += _block("🏷 Logo", "logo_start_min", "logo_end_min")
+        rows += _block("🟥 Banner cover", "cover_start_min", "cover_end_min")
+        rows += _block("📝 Caption", "text_start_min", "text_end_min")
+        rows += [[IKB("⏱ ✏️ then type: 30s · 1:23 · 1:57:00", "noop")], _back_row()]
         return IKM(rows)
     if which == "logos":
         sn = f"StreamNxt: {c['streamnxt_corner']} {'on' if c['streamnxt_on'] else 'OFF'}"
@@ -611,38 +655,79 @@ async def _notext(_, m: Message):
                   "Set one again with /text <your text>.")
 
 
+def _parse_time_min(raw: str):
+    """Parse a start time -> MINUTES (float). Accepts seconds (30s / 45sec),
+    minutes (2m / 2min / bare 2), or mm:ss (1:30). Bare number = minutes
+    (backward compatible). Seconds are the natural way to say 'under a minute'.
+    Returns None if unparseable."""
+    t = (raw or "").strip().lower().replace(",", ".")
+    if not t:
+        return None
+    try:
+        if ":" in t:                       # mm:ss or hh:mm:ss
+            cp = [float(x or 0) for x in t.split(":")]
+            if len(cp) == 2:
+                secs = cp[0] * 60 + cp[1]
+            elif len(cp) == 3:
+                secs = cp[0] * 3600 + cp[1] * 60 + cp[2]
+            else:
+                return None
+            return max(0.0, secs / 60.0)
+        mt = re.match(r"^([0-9]*\.?[0-9]+)\s*(s|sec|secs|m|min|mins|h|hr|hrs)?$", t)
+        if not mt:
+            return None
+        val = float(mt.group(1))
+        unit = mt.group(2) or "m"
+        if unit.startswith("s"):
+            return max(0.0, val / 60.0)
+        if unit.startswith("h"):
+            return max(0.0, val * 60.0)
+        return max(0.0, val)               # minutes
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_time(mins: float) -> str:
+    """Friendly label: seconds under a minute, else Nm / Nm Ss."""
+    if not mins or mins <= 0:
+        return "the start"
+    secs = int(round(mins * 60))
+    if secs < 60:
+        return f"{secs}s"
+    mm, ss = divmod(secs, 60)
+    return f"{mm}m" if ss == 0 else f"{mm}m {ss}s"
+
+
 @app.on_message(filters.command("begin") & filters.private)
 async def _begin(_, m: Message):
     if not _allowed(m.from_user.id):
         return
     if len(m.command) < 2:
-        return await m.reply("Usage: `/begin 2`  → logo, caption and banner-cover "
-                             "start at minute 2 (skips a 2-min intro). `/begin 0` = from start.")
-    try:
-        mins = float(m.command[1].replace(",", "."))
-    except ValueError:
-        return await m.reply("Give a number of minutes, e.g. `/begin 2`")
-    mins = max(0.0, mins)
+        return await m.reply("Usage: `/begin 30s` · `2m` · `1:30` · `2` (=2 min)  → logo, "
+                             "caption & banner-cover all start then. Seconds for under a minute, "
+                             "minutes for longer. `/begin 0` = from the very start.")
+    mins = _parse_time_min(m.command[1])
+    if mins is None:
+        return await m.reply("Give a time — `30s`, `2m`, `1:30`, or `2` (=2 min).")
     set_user(m.from_user.id, logo_start_min=mins, cover_start_min=mins, text_start_min=mins)
     if mins <= 0:
         await m.reply("✅ Everything starts from the very beginning.")
     else:
-        await m.reply(f"✅ Logo, caption & banner-cover all start at **{mins:g} min** "
-                      f"(first {mins:g} min / intro stays clean).\n"
-                      f"To set them separately: `/logoat 2`, `/coverat 2.5`, `/textat 3`")
+        await m.reply(f"✅ Logo, caption & banner-cover all start at **{_fmt_time(mins)}** "
+                      f"(intro stays clean).\n"
+                      f"Separately: `/logoat 30s`, `/coverat 2m`, `/textat 1:30`")
 
 
 async def _set_start(m: Message, key: str, label: str):
     if not _allowed(m.from_user.id):
         return
     if len(m.command) < 2:
-        return await m.reply(f"Usage: `/{m.command[0]} 2.5`  → {label} starts at minute 2.5")
-    try:
-        mins = max(0.0, float(m.command[1].replace(",", ".")))
-    except ValueError:
-        return await m.reply("Give minutes, e.g. `2` or `2.5`")
+        return await m.reply(f"Usage: `/{m.command[0]} 30s` · `2m` · `1:30` · `2` (=2 min)  → {label} starts then.")
+    mins = _parse_time_min(m.command[1])
+    if mins is None:
+        return await m.reply("Give a time, e.g. `30s`, `2m`, `1:30`, or `2` (=2 min).")
     set_user(m.from_user.id, **{key: mins})
-    await m.reply(f"✅ {label} starts at **{mins:g} min**.")
+    await m.reply(f"✅ {label} starts at **{_fmt_time(mins)}**.")
 
 
 @app.on_message(filters.command("logoat") & filters.private)
@@ -658,6 +743,33 @@ async def _coverat(_, m: Message):
 @app.on_message(filters.command("textat") & filters.private)
 async def _textat(_, m: Message):
     await _set_start(m, "text_start_min", "Caption")
+
+
+async def _set_end(m: Message, key: str, label: str):
+    if not _allowed(m.from_user.id):
+        return
+    if len(m.command) < 2:
+        return await m.reply(f"Usage: `/{m.command[0]} 1:57:00` · `1:23` · `30s`  → {label} ENDS then. `0` = full length.")
+    mins = _parse_time_min(m.command[1])
+    if mins is None:
+        return await m.reply("Give a time, e.g. `1:57:00`, `1:23`, `30s`, or `0` for full length.")
+    set_user(m.from_user.id, **{key: mins})
+    await m.reply(f"✅ {label} ends at **{(_fmt_time(mins) if mins > 0 else 'full length')}**.")
+
+
+@app.on_message(filters.command("logoend") & filters.private)
+async def _logoend(_, m: Message):
+    await _set_end(m, "logo_end_min", "Logo")
+
+
+@app.on_message(filters.command("coverend") & filters.private)
+async def _coverend(_, m: Message):
+    await _set_end(m, "cover_end_min", "Banner-cover")
+
+
+@app.on_message(filters.command("textend") & filters.private)
+async def _textend(_, m: Message):
+    await _set_end(m, "text_end_min", "Caption")
 
 
 @app.on_message(filters.command("save") & filters.private)
@@ -930,6 +1042,8 @@ async def _logoutpremium(_, m: Message):
 @app.on_message(filters.text & filters.private & ~filters.regex(r"^/"))
 async def _login_text(_, m: Message):
     uid = m.from_user.id
+    if uid in _awaiting_time:
+        return await _handle_time_input(m, uid)
     if not _allowed(uid) or uid not in _login:
         return
     st = _login[uid]
@@ -1606,6 +1720,22 @@ async def _cb(_, cq: CallbackQuery):
         return await cq.answer("private", show_alert=True)
     job = _pending.get(uid)
     data = cq.data
+
+    if data.startswith("tset:"):
+        key = data.split(":", 1)[1]
+        _awaiting_time[uid] = {"key": key, "msg": cq.message, "job": job}
+        await cq.message.edit_text(
+            f"✏️ Type the **{_timelabel(key)}** time and send it.\n\n"
+            "Examples:  `30s`  ·  `1:23` (1 min 23 s)  ·  `1:57:00` (1 h 57 m)  ·  `2m`  ·  `0` = off/full.")
+        return await cq.answer()
+    if data.startswith("tfull:"):
+        key = data.split(":", 1)[1]
+        set_user(uid, **{key: 0.0})
+        try:
+            await cq.message.edit_reply_markup(submenu("starts", uid, job))
+        except Exception:
+            pass
+        return await cq.answer("Full length")
 
     if data == "noop":
         return await cq.answer("Type:  /at 1 3 12 24 52   (minutes you want it shown)",
@@ -2284,6 +2414,17 @@ async def _render_job(uid: int, job: dict, status: Message):
                 _ls = 0.0 if _ls >= dur else _ls
                 _cs = 0.0 if _cs >= dur else _cs
                 _ts = 0.0 if _ts >= dur else _ts
+            _le = c.get("logo_end_min", 0.0) * 60
+            _ce = c.get("cover_end_min", 0.0) * 60
+            _te = c.get("text_end_min", 0.0) * 60
+            def _clend(e, ss_):
+                if not e or e <= 0:
+                    return 0.0
+                e = min(e, dur) if dur else e
+                return e if e > ss_ else 0.0
+            _le = _clend(_le, _ls)
+            _ce = _clend(_ce, _cs)
+            _te = _clend(_te, _ts)
             cfg = RenderConfig(
                 logos=logos, cover_png=_asset(settings.cover_png),
                 scroll_text=c["scroll_text"], scroll_seconds=c["scroll_seconds"],
@@ -2293,6 +2434,9 @@ async def _render_job(uid: int, job: dict, status: Message):
                 logo_start=_ls,
                 cover_start=_cs,
                 text_start=_ts,
+                logo_end=_le,
+                cover_end=_ce,
+                text_end=_te,
                 width=(job["w"] if c["width"] == 0 else c["width"]),
                 height=(job["h"] if c["height"] == 0 else c["height"]),
                 fps=c["fps"], video_bitrate_k=vk, audio_bitrate_k=c["audio_k"],
