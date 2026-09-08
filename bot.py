@@ -49,7 +49,7 @@ os.environ.setdefault("RCLONE_CONFIG", delivery.RCLONE_CONF)
 # Concurrency: up to MAX_RENDERS jobs render AT THE SAME TIME, so different
 # users' videos process simultaneously instead of waiting in one line. The VPS
 # cpu_shares/cpus caps keep the box (and the other bots) safe under load.
-_render_sem = asyncio.Semaphore(int(os.environ.get("MAX_RENDERS", "3")))
+_render_sem = asyncio.Semaphore(int(os.environ.get("MAX_RENDERS", "2")))
 _pending: dict[int, dict] = {}            # uid -> active job (probe + src path)
 _login: dict[int, dict] = {}              # uid -> premium-login flow state
 # PER-UID in-flight download/render so concurrent jobs don't clobber each other
@@ -158,6 +158,7 @@ DEFAULTS = {
     "bidhaan2_on": True, "bidhaan2_corner": "TL",
     "bidhaan2_frac": 0.132, "bidhaan2_mx": 0.038, "bidhaan2_my": 0.10,
     "logo_scale": 1.0,           # global multiplier on logo sizes
+    "custom_logo": "",           # per-user uploaded logo (empty = default bidhaan.png)
 }
 
 
@@ -239,6 +240,18 @@ def apply_template(uid: int, name: str) -> bool:
 
 def _asset(name: str) -> str:
     return os.path.join(settings.assets_dir, name)
+
+
+LOGO_DIR = os.path.join(DATA_DIR, "user_logos")
+_awaiting_logo: set[int] = set()   # uids who ran /logo and owe us an image
+
+
+def _user_logo(c: dict) -> str:
+    """The user's uploaded logo if they have one, else the default Bidhaan logo."""
+    p = c.get("custom_logo")
+    if p and os.path.exists(p):
+        return p
+    return _user_logo(c)
 
 
 # ---- access control: owner + an owner-managed allowlist of authorized ids ----
@@ -1126,9 +1139,40 @@ class _DubProgress:
         self._samples: list[tuple[float, float]] = []
         self._thr = _Throttle()
         self._last = ""
+        # Heartbeat: keeps the panel visibly alive during long silent stages so
+        # a working job never *looks* frozen (the #1 "is it stuck?" complaint).
+        self._hb_task = None
+        self._last_change = time.time()   # last time any pct actually moved
 
     def overall(self) -> float:
         return sum(self.pct[k] * self.WEIGHT[k] for k, _ in self.PHASES)
+
+    # ── heartbeat ───────────────────────────────────────────────────────────
+    def start_heartbeat(self, interval: float = 15.0):
+        """Re-render the panel every `interval`s even with no new progress, so
+        the elapsed clock ticks and the user can see the job is alive."""
+        if self._hb_task is None or self._hb_task.done():
+            self._hb_task = asyncio.create_task(self._heartbeat(interval))
+
+    def stop_heartbeat(self):
+        if self._hb_task and not self._hb_task.done():
+            self._hb_task.cancel()
+            self._hb_task = None
+
+    async def _heartbeat(self, interval: float):
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                txt = self._render()
+                if txt == self._last:
+                    continue          # nothing visibly changed (rare — elapsed moves)
+                self._last = txt
+                try:
+                    await self.status.edit(txt, reply_markup=IKM([[IKB("🛑 Cancel", "cancel")]]))
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
 
     def _elapsed(self) -> str:
         el = int(time.time() - self.started)
@@ -1184,12 +1228,22 @@ class _DubProgress:
                 rows.append(f"⏳ {lbl}\n`{_bar(v)}`{extra}")
             else:
                 rows.append(f"⬜ {label}")
+        # "Alive" line: how long since the last real progress move. A long
+        # quiet spell on a legitimately silent stage (e.g. analyse) is normal —
+        # this just proves the process is running, not hung.
+        quiet = int(time.time() - self._last_change)
+        alive = ""
+        if self.active and quiet >= 45:
+            alive = (f"  · still working ({quiet//60}m{quiet%60:02d}s quiet)"
+                     if quiet >= 60 else f"  · still working ({quiet}s quiet)")
         return (f"🎬 **Dub-sync** · `{self.title}`\n"
                 + "\n".join(rows)
-                + f"\n\n**Overall** `{_bar(self.overall())}`\n{self._eta()}")
+                + f"\n\n**Overall** `{_bar(self.overall())}`\n{self._eta()}{alive}")
 
     async def set(self, key: str, pct: float, note: str = "",
                   label: str = "", force: bool = False):
+        if abs(self.pct.get(key, 0.0) - max(0.0, min(100.0, pct))) > 0.001:
+            self._last_change = time.time()   # real progress → reset quiet timer
         self.pct[key] = max(0.0, min(100.0, pct))
         if self.pct[key] < 100:
             self.active = key
@@ -1503,6 +1557,8 @@ async def _on_video(_, m: Message):
     if not _allowed(uid):
         return await m.reply(f"⛔ This bot is private.\nYour ID is `{uid}` — "
                              "send it to the owner to request access.")
+    if uid in _awaiting_logo and (m.photo or (m.document and (m.document.mime_type or "").startswith("image"))):
+        return await _save_logo(m, uid)
     if m.document and not (m.document.mime_type or "").startswith("video"):
         return
     # A guided dub-sync takes priority; otherwise behave exactly as before.
@@ -1679,10 +1735,15 @@ async def _cb(_, cq: CallbackQuery):
 
     if data == "cover:toggle":
         c = user_cfg(uid)
-        set_user(uid, cover_mode=("off" if c["cover_mode"] == "auto" else "auto"))
+        new_mode = "off" if c["cover_mode"] == "auto" else "auto"
+        await cq.answer("Cover ads: " + new_mode)   # ack FIRST -> no spinner lag
+        set_user(uid, cover_mode=new_mode)
         text, kb = panel(uid, job)
-        await cq.message.edit(text, reply_markup=kb)
-        return await cq.answer("✓")
+        try:
+            await cq.message.edit(text, reply_markup=kb)
+        except Exception:
+            pass
+        return
 
     if data.startswith("tpl:"):
         name = data[4:]
@@ -1715,11 +1776,11 @@ def _brand_payload(uid: int) -> dict:
                       "frac": c["streamnxt_frac"] * sc,
                       "margin_x": c["streamnxt_mx"], "margin_y": c["streamnxt_my"]})
     if c["bidhaan_on"]:
-        logos.append({"path": _asset(settings.logo_tl), "corner": c["bidhaan_corner"],
+        logos.append({"path": _user_logo(c), "corner": c["bidhaan_corner"],
                       "frac": c["bidhaan_frac"] * sc,
                       "margin_x": c["bidhaan_mx"], "margin_y": c["bidhaan_my"]})
     if c["bidhaan2_on"]:
-        logos.append({"path": _asset(settings.logo_tl), "corner": c["bidhaan2_corner"],
+        logos.append({"path": _user_logo(c), "corner": c["bidhaan2_corner"],
                       "frac": c["bidhaan2_frac"] * sc,
                       "margin_x": c["bidhaan2_mx"], "margin_y": c["bidhaan2_my"]})
     return {
@@ -1744,6 +1805,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                     "task": asyncio.current_task()}
     prog = _DubProgress(status, dubsync_job._slug(_vmeta(msgs[hd_i])[0]))
     await prog.set("dl_hd", 0, force=True)
+    prog.start_heartbeat()   # panel stays visibly alive through silent stages
     jobs = []
     try:
         for i, m in enumerate(msgs):
@@ -1858,29 +1920,47 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         dur_bad = bool(expected) and odur > 0 and abs(odur - expected) > tol
         ok_decode, decode_err = await asyncio.to_thread(verify_decodable, str(res.path))
         gate_held = res.stats.get("gate") == "held"
-        if dur_bad or not ok_decode or gate_held:
+
+        # QA POLICY (per John, 2026-08-18): the video is ALWAYS delivered. The
+        # only thing that truly makes a file useless is if it won't PLAY — so a
+        # decode failure is the sole hard block. "Integrity gate held" (residual
+        # accidental duplication) and a duration mismatch are turned into ADVISORY
+        # warnings appended to the caption: John gets the movie every time and
+        # decides for himself whether the residual repeats bother him. This ends
+        # the "render finished but not delivered" dead-end.
+        if not ok_decode:
             os.makedirs(OUTBOX, exist_ok=True)
             qa_saved = os.path.join(
                 OUTBOX,
                 f"{int(time.time())}_{uid}_qafail_{os.path.basename(hd_job['name'])}")
             await asyncio.to_thread(shutil.move, str(res.path), qa_saved)
-            reasons = []
-            if dur_bad:
-                reasons.append(f"duration {odur:.1f}s vs expected {expected:.1f}s")
-            if not ok_decode:
-                reasons.append(f"decode error: {decode_err[-200:]}")
-            if gate_held:
-                notes = "; ".join((res.stats.get("gate_notes") or [])[:3])
-                reasons.append(f"integrity gate held{': ' + notes if notes else ''}")
-            log.error("QA gate failed for %s: %s", title, "; ".join(reasons))
+            log.error("QA hard-block (undecodable) for %s: %s", title, decode_err[-200:])
             return await status.edit(
-                "⚠️ **Render finished but failed the quality check** — not "
-                "auto-delivered, so a broken file doesn't land in your chat "
-                f"unannounced.\n`{'; '.join(reasons)[:400]}`\n\n"
-                f"Saved at `{qa_saved}` if you want to inspect it yourself "
-                "— otherwise just retry.")
+                "⚠️ **Render produced an unplayable file** (decode error) — not "
+                "delivered because it literally won't play.\n"
+                f"`{decode_err[-300:]}`\n\n"
+                f"Saved at `{qa_saved}`. Retry usually fixes a transient encode error.")
+
+        # Build advisory warnings (do NOT block delivery).
+        warns = []
+        if gate_held:
+            notes = "; ".join((res.stats.get("gate_notes") or [])[:3])
+            warns.append(f"integrity: {notes}" if notes else "integrity gate held (residual repeats)")
+        if dur_bad:
+            warns.append(f"duration {odur:.1f}s vs expected {expected:.1f}s")
+        if warns:
+            log.warning("QA advisory (delivering anyway) for %s: %s", title, "; ".join(warns))
 
         cap = dubsync_job.summary_caption(title, res, odur, sz)
+        if warns:
+            cap = (cap or title) + "\n\n⚠️ QA note (delivered anyway): " + " · ".join(warns)
+        # List EXACTLY where the checker suspects repeats, so John can jump there.
+        dup_regions = res.stats.get("dup_regions") or []
+        if dup_regions:
+            shown = dup_regions[:8]
+            cap += "\n\n🔎 Check these spots:\n" + "\n".join(shown)
+            if len(dup_regions) > len(shown):
+                cap += f"\n…+{len(dup_regions)-len(shown)} more"
         name = f"dubsync_{os.path.basename(hd_job['name'])}"
 
         # Same protection the branding path gets: keep the finished file in the
@@ -1926,6 +2006,8 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
             except Exception:
                 pass
     finally:
+        try: prog.stop_heartbeat()
+        except Exception: pass
         _active.pop(uid, None)
         for j in jobs:
             try:
@@ -2151,21 +2233,35 @@ async def _render_job(uid: int, job: dict, status: Message):
                 logos.append(Logo(_asset(settings.logo_tr), c["streamnxt_corner"],
                                   c["streamnxt_frac"] * sc, c["streamnxt_mx"], c["streamnxt_my"]))
             if c["bidhaan_on"]:
-                logos.append(Logo(_asset(settings.logo_tl), c["bidhaan_corner"],
+                logos.append(Logo(_user_logo(c), c["bidhaan_corner"],
                                   c["bidhaan_frac"] * sc, c["bidhaan_mx"], c["bidhaan_my"]))
             if c["bidhaan2_on"]:
-                logos.append(Logo(_asset(settings.logo_tl), c["bidhaan2_corner"],
+                logos.append(Logo(_user_logo(c), c["bidhaan2_corner"],
                                   c["bidhaan2_frac"] * sc, c["bidhaan2_mx"], c["bidhaan2_my"]))
 
+            # Intro-skip offsets (logo/cover/text start N minutes in) are a
+            # FULL-MOVIE idea: skip the studio intro before branding. On a
+            # short clip (trailer/teaser) a 2-5 min offset would blank the
+            # covers, logo AND caption entirely. So brand short clips from
+            # 0:00, and never let an offset exceed the video length.
+            _ls = c.get("logo_start_min", 0.0) * 60
+            _cs = c.get("cover_start_min", 0.0) * 60
+            _ts = c.get("text_start_min", 0.0) * 60
+            if dur and dur < 600:            # under 10 min => a clip, not a movie
+                _ls = _cs = _ts = 0.0
+            elif dur:
+                _ls = 0.0 if _ls >= dur else _ls
+                _cs = 0.0 if _cs >= dur else _cs
+                _ts = 0.0 if _ts >= dur else _ts
             cfg = RenderConfig(
                 logos=logos, cover_png=_asset(settings.cover_png),
                 scroll_text=c["scroll_text"], scroll_seconds=c["scroll_seconds"],
                 scroll_count=(c["scroll_count"] or max(1, int(dur / max(2.0, c["scroll_seconds"])))),
                 scroll_times=[mn * 60 for mn in c.get("scroll_times", []) if mn * 60 < dur],
                 caption_scale=c.get("caption_scale", 0.016),
-                logo_start=c.get("logo_start_min", 0.0) * 60,
-                cover_start=c.get("cover_start_min", 0.0) * 60,
-                text_start=c.get("text_start_min", 0.0) * 60,
+                logo_start=_ls,
+                cover_start=_cs,
+                text_start=_ts,
                 width=(job["w"] if c["width"] == 0 else c["width"]),
                 height=(job["h"] if c["height"] == 0 else c["height"]),
                 fps=c["fps"], video_bitrate_k=vk, audio_bitrate_k=c["audio_k"],
@@ -2235,8 +2331,18 @@ async def _render_job(uid: int, job: dict, status: Message):
                 except Exception:
                     pass
             else:
-                log.exception("render failed")
-                await status.edit(f"❌ Failed: `{str(e)[:300]}`")
+                if str(e).startswith("CORRUPT_SOURCE:"):
+                    log.error("corrupt source rejected: %s", job.get("src"))
+                    await status.edit(
+                        "❌ **This video is corrupted or was uploaded "
+                        "incompletely** — ffmpeg cannot decode it, so it "
+                        "cannot be branded.\n\nPlease re-send the original "
+                        "file and try again. (Large uploads over a weak "
+                        "connection sometimes arrive damaged — re-sending "
+                        "usually fixes it.)")
+                else:
+                    log.exception("render failed")
+                    await status.edit(f"❌ Failed: `{str(e)[:300]}`")
         finally:
             _active.pop(uid, None)
             _pending.pop(uid, None)
@@ -2247,6 +2353,77 @@ async def _render_job(uid: int, job: dict, status: Message):
                     os.rmdir(root)
             except OSError:
                 pass
+
+
+
+# ---- custom per-user logo upload --------------------------------------------
+async def _save_logo(m: Message, uid: int) -> None:
+    os.makedirs(LOGO_DIR, exist_ok=True)
+    path = os.path.join(LOGO_DIR, f"{uid}.png")
+    try:
+        await m.download(file_name=path)
+    except Exception as e:
+        _awaiting_logo.discard(uid)
+        await m.reply(f"Couldn't save that image: {e}")
+        return
+    set_user(uid, custom_logo=path)
+    _awaiting_logo.discard(uid)
+    warn = ""
+    if m.photo:
+        warn = ("\n\n⚠️ You sent it as a *photo*, so a transparent background was "
+                "flattened. For a clean transparent logo, resend the PNG as a **file** "
+                "(attach → File), then /logo again.")
+    await m.reply(
+        "✅ Logo saved — it'll be burned into your next render (top-left brand slot).\n"
+        "Use /logoreset to go back to the default." + warn)
+
+
+@app.on_message(filters.command("logo") & filters.private)
+async def _cmd_logo(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid):
+        return
+    r = m.reply_to_message
+    if r and (r.photo or (r.document and (r.document.mime_type or "").startswith("image"))):
+        return await _save_logo(r, uid)
+    c = user_cfg(uid)
+    cur = c.get("custom_logo")
+    has = bool(cur and os.path.exists(cur))
+    _awaiting_logo.add(uid)
+    await m.reply(
+        "🏷 **Upload your logo**\n\n"
+        f"Current: {'your custom logo ✅' if has else 'default (Bidhaan)'}\n\n"
+        "Now send me your logo image:\n"
+        "• Best: send a **PNG as a FILE** (attach → File) so transparency is kept.\n"
+        "• A normal photo works too, but loses transparency.\n\n"
+        "It replaces the top-left brand logo on your renders. /logoreset = default.")
+
+
+@app.on_message(filters.command(["logoreset", "logodefault"]) & filters.private)
+async def _cmd_logoreset(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid):
+        return
+    c = user_cfg(uid)
+    p = c.get("custom_logo")
+    if p and os.path.exists(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    set_user(uid, custom_logo="")
+    _awaiting_logo.discard(uid)
+    await m.reply("↩️ Back to the default logo.")
+
+
+@app.on_message(filters.photo & filters.private)
+async def _on_photo(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid):
+        return
+    if uid in _awaiting_logo:
+        await _save_logo(m, uid)
+    # otherwise: ignore photos (unchanged behaviour)
 
 
 if __name__ == "__main__":
