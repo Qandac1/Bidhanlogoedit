@@ -591,10 +591,24 @@ async def _text(_, m: Message):
     if not _allowed(m.from_user.id):
         return
     if len(m.command) < 2:
-        return await m.reply("Usage: `/text ugaar ah bidhaan tv 0619624090`")
+        return await m.reply("Usage: `/text ugaar ah bidhaan tv 0619624090`\n"
+                             "Remove the caption entirely: /notext")
     new = m.text.split(None, 1)[1].strip()
+    if new.lower() in ("off", "none", "clear", "no", "remove", "-"):
+        set_user(m.from_user.id, scroll_text="")
+        return await m.reply("✅ Caption removed — no scrolling text on your renders.\n"
+                             "Set one again with /text <your text>.")
     set_user(m.from_user.id, scroll_text=new)
     await m.reply(f"✅ Caption set:\n`{new}`")
+
+
+@app.on_message(filters.command(["notext", "nocaption", "cleartext", "textoff"]) & filters.private)
+async def _notext(_, m: Message):
+    if not _allowed(m.from_user.id):
+        return
+    set_user(m.from_user.id, scroll_text="")
+    await m.reply("✅ Caption removed — no scrolling text on your renders.\n"
+                  "Set one again with /text <your text>.")
 
 
 @app.on_message(filters.command("begin") & filters.private)

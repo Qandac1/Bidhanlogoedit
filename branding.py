@@ -195,6 +195,9 @@ def build_filter(src_w: int, src_h: int, duration: float,
 
     # scrolling caption (bottom -> up over scroll_seconds).
     txt = _esc_text(cfg.scroll_text)
+    if not (cfg.scroll_text or "").strip():
+        parts.append(f"[{cur}]null[outv]")
+        return ";".join(parts)
     T = max(2.0, cfg.scroll_seconds)
     base = (f"drawtext=fontfile={FONT}:text='{txt}':fontcolor=white:"
             f"fontsize={fontsize}:borderw=2:bordercolor=black@0.9:x=(w-text_w)/2")
@@ -246,7 +249,7 @@ def render(video: str, out_path: str, events: list[CoverEvent],
     for lg in cfg.logos:
         inputs += ["-i", lg.path]
 
-    cmd = ["ffmpeg", "-hide_banner", "-y", *inputs,
+    cmd = ["ffmpeg", "-hide_banner", "-xerror", "-y", *inputs,
            "-filter_complex", fc,
            "-map", "[outv]", "-map", "0:a?",
            "-r", str(cfg.fps),
@@ -285,6 +288,14 @@ def render(video: str, out_path: str, events: list[CoverEvent],
     proc.wait()
     if proc.returncode != 0:
         err = proc.stderr.read() if proc.stderr else ""
+        low = err.lower()
+        if any(s in low for s in (
+                "invalid nal unit", "error splitting the input into nal",
+                "invalid data found", "error while decoding",
+                "non-existing pps", "cannot decode", "corrupt")):
+            raise RuntimeError(
+                "CORRUPT_SOURCE: the video file is damaged or was uploaded "
+                "incompletely, so it cannot be decoded or branded.")
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {err[-1500:]}")
     if progress_cb:
         progress_cb(100.0)
