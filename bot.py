@@ -2357,11 +2357,45 @@ async def _render_job(uid: int, job: dict, status: Message):
 
 
 # ---- custom per-user logo upload --------------------------------------------
+def _trim_logo(path: str) -> None:
+    """Crop empty margins off an uploaded logo so the actual mark fills the frame.
+
+    A user logo often sits in a big mostly-empty canvas; scaling the WHOLE image
+    to a fraction of the video height then makes the real mark tiny. Trimming to
+    the content bbox (transparent margins, or a uniform border color for opaque
+    images) makes it render at the intended size, matching the default logo."""
+    try:
+        from PIL import Image, ImageChops
+        im = Image.open(path).convert("RGBA")
+    except Exception:
+        return
+    bbox = im.getchannel("A").getbbox()          # trim transparent border
+    if bbox is None:                              # opaque -> trim uniform bg color
+        try:
+            rgb = im.convert("RGB")
+            bg = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
+            diff = ImageChops.difference(rgb, bg).convert("L").point(lambda p: 255 if p > 18 else 0)
+            bbox = diff.getbbox()
+        except Exception:
+            bbox = None
+    if not bbox:
+        return
+    w, h = im.size
+    pad = max(2, int(0.02 * max(bbox[2] - bbox[0], bbox[3] - bbox[1])))
+    box = (max(0, bbox[0] - pad), max(0, bbox[1] - pad),
+           min(w, bbox[2] + pad), min(h, bbox[3] + pad))
+    try:
+        im.crop(box).save(path)
+    except Exception:
+        pass
+
+
 async def _save_logo(m: Message, uid: int) -> None:
     os.makedirs(LOGO_DIR, exist_ok=True)
     path = os.path.join(LOGO_DIR, f"{uid}.png")
     try:
         await m.download(file_name=path)
+        _trim_logo(path)
     except Exception as e:
         _awaiting_logo.discard(uid)
         await m.reply(f"Couldn't save that image: {e}")
