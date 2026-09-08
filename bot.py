@@ -1647,6 +1647,7 @@ async def _run_batch(uid: int) -> None:
     if not msgs:
         return
     _batch_cancel[uid] = False
+    _journal_set(uid, msgs)
     total = len(msgs)
     done = 0
     head = await msgs[0].reply(f"📦 **Batch started** — 0/{total} done.")
@@ -1659,6 +1660,7 @@ async def _run_batch(uid: int) -> None:
             await _render_job(uid, job, status)
             if not _batch_cancel.get(uid):
                 done += 1
+                _journal_done(uid, m)
         except Exception as e:
             if _act(uid).get("cancelled") or _batch_cancel.get(uid):
                 pass
@@ -2635,6 +2637,100 @@ async def _on_photo(_, m: Message):
     # otherwise: ignore photos (unchanged behaviour)
 
 
+# ---- crash/restart-safe batch journal + /resume ----------------------------
+JOURNAL_FILE = os.path.join(DATA_DIR, "batch_journal.json")
+
+
+def _journal_load() -> dict:
+    try:
+        with open(JOURNAL_FILE) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _journal_save(d: dict) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(JOURNAL_FILE, "w") as f:
+        json.dump(d, f, indent=2)
+
+
+def _journal_set(uid: int, msgs: list) -> None:
+    d = _journal_load()
+    d[str(uid)] = [{"chat_id": m.chat.id, "msg_id": m.id} for m in msgs]
+    _journal_save(d)
+
+
+def _journal_done(uid: int, m) -> None:
+    d = _journal_load()
+    lst = [e for e in d.get(str(uid), []) if e.get("msg_id") != m.id]
+    if lst:
+        d[str(uid)] = lst
+    else:
+        d.pop(str(uid), None)
+    _journal_save(d)
+
+
+def _journal_pending(uid: int) -> list:
+    return _journal_load().get(str(uid), [])
+
+
+@app.on_message(filters.command("resume") & filters.private)
+async def _resume(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid):
+        return
+    if _batch.get(uid):
+        return await m.reply("A batch is already running. Let it finish, then /resume any leftovers.")
+    pend = _journal_pending(uid)
+    if not pend:
+        return await m.reply("✅ Nothing to resume — no unfinished batch.")
+    wait = await m.reply(f"▶️ Re-fetching {len(pend)} unfinished video(s)…")
+    msgs = []
+    for e in pend:
+        try:
+            mm = await app.get_messages(e["chat_id"], e["msg_id"])
+            if mm and (mm.video or mm.document):
+                msgs.append(mm)
+        except Exception:
+            pass
+    if not msgs:
+        d = _journal_load(); d.pop(str(uid), None); _journal_save(d)
+        return await wait.edit("Couldn't re-fetch those (messages deleted?). Please re-send them.")
+    _batch[uid] = msgs
+    await wait.edit(f"▶️ Resuming {len(msgs)} video(s) — branding them now…")
+    await _run_batch(uid)
+
+
+async def _notify_pending_on_startup() -> None:
+    try:
+        d = _journal_load()
+    except Exception:
+        return
+    for uid_s, items in list(d.items()):
+        if not items:
+            continue
+        try:
+            await app.send_message(
+                int(uid_s),
+                f"⚠️ The bot restarted and **{len(items)} video(s)** from your last batch "
+                "didn't finish. Send /resume to continue them — no need to re-upload.")
+        except Exception:
+            pass
+
+
+async def _main() -> None:
+    from pyrogram import idle
+    await app.start()
+    log.info("Bidhaan Logo-Edit bot started; checking for unfinished batches…")
+    try:
+        await _notify_pending_on_startup()
+    except Exception:
+        log.exception("startup resume-notify failed")
+    await idle()
+    await app.stop()
+
+
 if __name__ == "__main__":
     log.info("Bidhaan Logo-Edit bot starting…")
-    app.run()
+    app.run(_main())
