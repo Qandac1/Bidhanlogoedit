@@ -1265,10 +1265,28 @@ class _DubProgress:
             pass
 
 
+def _derive_name(m: Message) -> str:
+    """Original filename for a message: the file's own name, else the first line
+    of its caption (movie title), else a generic fallback. Keeps the real title
+    on the delivered output instead of 'video.mp4'."""
+    v = m.video or m.document
+    fn = getattr(v, "file_name", None)
+    if fn:
+        return fn
+    cap = (m.caption or "").strip()
+    if cap:
+        first = cap.splitlines()[0]
+        first = re.sub(r'[\\/:*?"<>|\n\r\t]', " ", first)
+        first = re.sub(r"\s+", " ", first).strip()[:90].strip()
+        if first:
+            return first if first.lower().endswith((".mp4", ".mkv", ".webm", ".avi")) else first + ".mp4"
+    return "video.mp4"
+
+
 def _vmeta(m: Message) -> tuple[str, int, int, float]:
     """Name/size/duration straight from Telegram — no download needed."""
     v = m.video or m.document
-    name = (getattr(v, "file_name", None) or "video.mp4")
+    name = _derive_name(m)
     w = int(getattr(v, "width", 0) or 0)
     h = int(getattr(v, "height", 0) or 0)
     dur = float(getattr(v, "duration", 0) or 0)
@@ -2074,8 +2092,7 @@ async def _build_job(uid: int, m: Message, status: Message,
             path = None
         if not path:
             path = await m.download(file_name=dest, progress=_dlp)
-        name = (getattr(m.video, "file_name", None)
-                or getattr(m.document, "file_name", None) or "video.mp4")
+        name = _derive_name(m)
     w, h, dur = await asyncio.to_thread(probe, path)
     return {"src": path, "work": work, "w": w, "h": h, "duration": dur,
             "name": name, "msg": m}
@@ -2298,7 +2315,7 @@ async def _render_job(uid: int, job: dict, status: Message):
             ow, oh, odur = await asyncio.to_thread(probe, out)
             sz = os.path.getsize(out)
             cap = f"✅ Branded — {len(events)} banner(s) covered • {human_size(sz)}"
-            name = f"branded_{os.path.basename(job['name'])}"
+            name = os.path.splitext(os.path.basename(job['name']))[0] + ".mp4"
 
             # PRESERVE the finished file in a persistent outbox BEFORE trying to
             # deliver it — so it's NEVER lost if delivery fails (MEGA full, over
