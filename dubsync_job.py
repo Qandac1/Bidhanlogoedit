@@ -742,8 +742,40 @@ def _write_render_report(title, hd, dub, work, out, chunk_rows, anomalies,
     # A report that contradicts the file is worse than no report, so it now
     # states the branding state it was actually given.
     if branding == "on":
-        A("- Branding IS burned in (logos + scrolling caption), in the same")
-        A("  video pass that attaches the audio — no second encode.")
+        # Say what was ACTUALLY burned in, not a fixed phrase. The first version
+        # of this line read "logos + scrolling caption" unconditionally, so a
+        # render with a logo and NO caption (John's scroll_text is empty) was
+        # reported as having one. That is the same over-claiming this block was
+        # written to stop, one level finer. The engine already logs the truth:
+        #   [dlg] branding ON 1920x804: 1 logo(s), 2 filters, ...
+        #         caption passes at [...]
+        # so parse it rather than guess.
+        _logos, _caps = None, None
+        try:
+            import re as _re
+            _raw = Path(str(out)).with_name(Path(str(out)).stem + ".log")
+            if _raw.exists():
+                for _ln in _raw.read_text(errors="replace").splitlines():
+                    if "branding ON" not in _ln:
+                        continue
+                    _m = _re.search(r"(\d+)\s+logo\(s\)", _ln)
+                    if _m:
+                        _logos = int(_m.group(1))
+                    _c = _re.search(r"caption passes at \[([^\]]*)\]", _ln)
+                    if _c:
+                        _items = [x for x in _c.group(1).split(",") if x.strip()]
+                        _caps = len(_items)
+                    break
+        except Exception:
+            pass
+        if _logos is None:
+            A("- Branding IS burned in, in the same video pass that attaches")
+            A("  the audio — no second encode.")
+        else:
+            _bits = "%d logo(s)" % _logos
+            _bits += (" + %d caption pass(es)" % _caps) if _caps else " (no caption)"
+            A("- Branding IS burned in: %s, in the same video pass that" % _bits)
+            A("  attaches the audio — no second encode.")
     elif branding == "off":
         A("- No branding burned in (none was configured for this job).")
     else:
