@@ -539,7 +539,8 @@ async def run_dubsync(
 
     if mode == "dlg":
         return await _render_dialogue_layer(hd, dub, title, on_progress,
-                                            register, _cancelled, stats)
+                                            register, _cancelled, stats,
+                                            brand_path)
 
     out = OUT_DIR / out_name
     if not out.exists():
@@ -728,13 +729,18 @@ def _write_render_report(title, hd, dub, work, out, chunk_rows, anomalies,
 
 
 async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
-                                 on_progress, register, cancelled, stats) -> DubResult:
+                                 on_progress, register, cancelled, stats,
+                                 brand_path: Path | None = None) -> DubResult:
     """HD master + Somali-dialogue overlay (dubsync2 dialogue_layer, --full).
 
     Keeps the HD's own music/SFX/action audio and lays ONLY the dub's isolated
     speech over it, so the fight/impact matching that has no reliable automatic
-    signal never arises. Carries NO burned-in branding and renders the HD
-    timeline, not the dub editorial timeline -- the caller states that plainly.
+    signal never arises. Renders the HD timeline, not the dub editorial
+    timeline -- the caller states that plainly.
+
+    Branding is now OPTIONAL here rather than absent: given brand_path, the
+    logos and caption are burned in during the mux's EXISTING video re-encode,
+    so this mode no longer trades John's branding away to get HD audio.
     """
     work = _work_dir_for(hd, dub)
     # Real denominator for the progress bar. Without this the first chunk
@@ -756,6 +762,14 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     cmd = [DLG_PY, "-u", DLG_SCRIPT, "--work", str(work),
            "--full", "--chunk", "300", "--out", str(out)]
+    # Brand only when the panel actually produced a config. Passing a missing
+    # path would make the engine log UNBRANDED on every render and hide a real
+    # misconfiguration behind a warning nobody reads.
+    if brand_path and Path(brand_path).exists():
+        cmd += ["--brand-json", str(brand_path)]
+        stats["branding"] = "on"
+    else:
+        stats["branding"] = "off"
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     if register:

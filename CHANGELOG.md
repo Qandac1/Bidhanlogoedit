@@ -1,5 +1,39 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-09-12
+
+### Added
+- **Branded dialogue-layer — you no longer choose between the two modes.**
+  Dialogue-layer used to be a trade: it kept the HD master's own music/SFX/
+  action audio, but carried no logos and no caption. It now burns the branding
+  in as well, so picking a mode is about AUDIO and TIMELINE only, never about
+  giving up the branding.
+  - The branding rides inside the video re-encode the dialogue-layer mux was
+    already doing, so it costs **no second encode** and no extra generation
+    loss.
+  - Reuses dubsync2's OWN brand module (`dubsync2.brand.segment_filters`), the
+    same code conform renders with, so logos and caption land identically in
+    both modes instead of drifting apart as two implementations.
+  - Logo size/margins come from the HD's REAL pixel size (new `probe_wh`), not
+    the panel's ow/oh. This mux never scales, and real masters are not
+    1920x1080 — Tammal is 1920x808, The Comeback 1920x720.
+  - Branding can never cost a render: if the brand module or its config fails
+    to load, the engine logs UNBRANDED and renders anyway. A movie without
+    logos is usable; a crashed 70-minute render is not.
+  - Verified on a real 120s Tammal window (1920x808, 2 logos + caption):
+    PSNR branded vs unbranded is 20.60 dB in the bidhaan corner and 27.99 dB in
+    the streamnxt corner (both heavily changed) against 37.54 dB in the centre
+    (unchanged bar re-encode noise). Duration identical to 6 decimal places
+    (120.958333 = 120.958333), so INV-3 holds. The unbranded path renders
+    exactly as before.
+  (backups: dialogue_layer.py.pre-brand-*, dubsync_job.py.pre-brand-*)
+
+### Fixed
+- **The panel no longer lies about dialogue-layer.** The mode button and its
+  confirmation toast both read "Dialogue-layer (HD audio, no branding)", which
+  stopped being true the moment branding was added. Both now read
+  "Dialogue-layer (HD audio + branding)". (backup: bot.py.pre-dlgbrand)
+
 ## 2026-09-11
 
 ### Changed

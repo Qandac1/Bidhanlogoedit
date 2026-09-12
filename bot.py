@@ -1959,7 +1959,7 @@ def _dub_panel_kb(uid: int) -> IKM:
         [IKB("🔄 Swap HD ⇄ Dub", "dub:swap"),
          IKB(("🏷 Branding: ON" if brand_on else "🏷 Branding: OFF"), "dub:brand")],
         [IKB(("\U0001F3AC Mode: Conform (branded)" if mode_ == "conform"
-              else "\U0001F5E3 Mode: Dialogue-layer (HD audio, no branding)"),
+              else "\U0001F5E3 Mode: Dialogue-layer (HD audio + branding)"),
              "dub:mode")],
         [IKB("✅ Start dub-sync", "dub:start"), IKB("❌ Cancel", "dub:cancel")],
     ]
@@ -2226,11 +2226,14 @@ async def _cb(_, cq: CallbackQuery):
             # Per-job choice, like Branding. conform = the long-standing
             # path (dub editorial timeline, branding burned in).
             # dlg = HD master + Somali dialogue only: keeps the HD music/
-            # SFX/action audio, but NO branding and the HD timeline.
+            # SFX/action audio, on the HD timeline. Branding is burned in
+            # here TOO now -- it rides the mux's existing video re-encode, so
+            # it costs no extra pass -- which makes this choice about AUDIO
+            # and TIMELINE, not about giving up the logos and caption.
             sel["mode"] = "dlg" if sel.get("mode", "conform") == "conform" else "conform"
             await _refresh_dub_panel(uid)
             return await cq.answer(
-                "Dialogue-layer (HD audio, no branding)" if sel["mode"] == "dlg"
+                "Dialogue-layer (HD audio + branding)" if sel["mode"] == "dlg"
                 else "Conform (branded)")
         if act == "start":
             msgs = sel["msgs"]
