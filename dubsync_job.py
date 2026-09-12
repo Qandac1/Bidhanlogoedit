@@ -765,12 +765,26 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
     chunk_rows: list[dict] = []
     anomalies: list[str] = []
     tail: list[str] = []
+    # Keep the engine's RAW stdout. A report rebuilt from a log that lacks the
+    # chunk lines shows an empty table and "0 placed" on a render that actually
+    # placed 1254 segments -- misleading evidence is worse than none.
+    raw_log = OUT_DIR / f"{title}_dlg.log"
+    try:
+        raw_fh = open(raw_log, "w", encoding="utf-8")
+    except OSError:
+        raw_fh = None
     assert proc.stdout is not None
     while True:
         raw = await proc.stdout.readline()
         if not raw:
             break
         line = raw.decode("utf-8", "replace").rstrip()
+        if raw_fh:
+            try:
+                raw_fh.write(line + "\n")
+                raw_fh.flush()
+            except OSError:
+                pass
         tail.append(line)
         del tail[:-25]
         low = line.lower()
@@ -805,6 +819,11 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
             if asyncio.iscoroutine(res):
                 await res
     await proc.wait()
+    if raw_fh:
+        try:
+            raw_fh.close()
+        except OSError:
+            pass
     if proc.returncode != 0:
         return DubResult(False, None,
                          "dialogue-layer failed (exit %d)\n%s"
@@ -830,6 +849,7 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
         stats["report"] = str(rp)
     except Exception as _e:            # a report must never fail the render
         stats["report_error"] = str(_e)[:200]
+    stats["raw_log"] = str(raw_log)
     stats["mode"] = "dialogue-layer"
     stats["segments_placed"] = placed
     stats["chunks"] = chunks
