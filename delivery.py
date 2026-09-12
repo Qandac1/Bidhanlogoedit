@@ -160,8 +160,12 @@ def mega_upload(path: str, name: str | None = None, progress_cb=None) -> str:
             raise RuntimeError("MEGA upload failed: " + _friendly(up.stderr or up.stdout))
     else:
         proc = subprocess.Popen(
+            # NOTE: no "-P" — rclone's -P progress display updates one line
+            # in place with carriage returns, which a line-based reader never
+            # sees until the end (frozen bar). Plain --stats-one-line at NOTICE
+            # level emits one newline-terminated "…, NN%, …" line per second.
             [RCLONE, "--config", RCLONE_CONF, "copyto", path, dest,
-             "-P", "--stats", "2s", "--stats-one-line"],
+             "--stats", "1s", "--stats-one-line", "--stats-log-level", "NOTICE"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         assert proc.stdout is not None
         watchdog = _StallWatchdog(proc)
