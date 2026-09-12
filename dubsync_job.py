@@ -245,6 +245,22 @@ async def prepare_inputs(hd_src: Path, dub_src: Path, title: str,
     hd = RAW_DIR / f"{title}_hd_ORIG{hd_src.suffix}"
     dub = RAW_DIR / f"{title}_dub_ORIG{dub_src.suffix}"
     for src, dst in ((hd_src, hd), (dub_src, dub)):
+        # SAME-FILE GUARD. This used to be an unconditional dst.unlink() followed
+        # by os.link(src, dst). When src and dst are the SAME file -- a re-run on
+        # inputs already sitting in raw/, or two submissions resolving to the
+        # same title -- the unlink DELETES THE ONLY COPY and the link then fails
+        # with FileNotFoundError, leaving nothing behind.
+        #
+        # This is not hypothetical: the 2026-08-14 incident (see _slug's note)
+        # lost a movie's raw source exactly this way when two different films
+        # slugified identically. The slug collision was fixed; the destructive
+        # unlink that actually did the damage was not. Nothing to do when the
+        # source is already in place.
+        try:
+            if dst.exists() and src.exists() and os.path.samefile(src, dst):
+                continue
+        except OSError:
+            pass
         if dst.exists():
             dst.unlink()
         try:
