@@ -603,7 +603,7 @@ def _probe(path, sel, entries):
 
 
 def _write_render_report(title, hd, dub, work, out, chunk_rows, anomalies,
-                         vdur, adur, placed, chunks):
+                         vdur, adur, placed, chunks, branding="unknown"):
     """Human-readable evidence file for one dialogue-layer render.
 
     Deliberately records the RAW per-chunk numbers, not just a summary: the
@@ -720,7 +720,19 @@ def _write_render_report(title, hd, dub, work, out, chunk_rows, anomalies,
     A("## What this mode does (and does not) do")
     A("- Keeps the HD's OWN music, effects and action audio — correct by construction.")
     A("- Lays only the dub's isolated Somali speech over it.")
-    A("- Does NOT burn in branding, and renders the HD timeline (not the dub cut).")
+    # This line used to read "Does NOT burn in branding" unconditionally. Once
+    # branding shipped, the report stated the OPPOSITE of what the render did:
+    # it told John a film carrying 2 logos and 8 caption passes was unbranded.
+    # A report that contradicts the file is worse than no report, so it now
+    # states the branding state it was actually given.
+    if branding == "on":
+        A("- Branding IS burned in (logos + scrolling caption), in the same")
+        A("  video pass that attaches the audio — no second encode.")
+    elif branding == "off":
+        A("- No branding burned in (none was configured for this job).")
+    else:
+        A("- Branding state not recorded for this render.")
+    A("- Renders the HD timeline, not the dub editorial cut.")
     A("- Lip-to-word sync is not achievable for any dub: the picture is an actor")
     A("  speaking another language. What is achievable is shot/event placement.")
     A("")
@@ -859,7 +871,8 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
     v, a = _dur("v:0"), _dur("a:0")
     try:
         rp = _write_render_report(title, hd, dub, work, out, chunk_rows,
-                                  anomalies, v, a, placed, chunks)
+                                  anomalies, v, a, placed, chunks,
+                                  stats.get("branding", "unknown"))
         stats["report"] = str(rp)
     except Exception as _e:            # a report must never fail the render
         stats["report_error"] = str(_e)[:200]
@@ -874,6 +887,27 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
             return DubResult(True, out,
                              "delivered for review — audio/video skew %+.3fs (INV-3)" % skew,
                              stats)
+
+    # PLAYABILITY GATE (FM-015). A render used to be called "released" on sync
+    # alone, and that is exactly how a film that no Android decoder could open
+    # was reported as finished with a +0.001s skew. Sync being perfect is
+    # worthless if the file will not play. libx264 inherits the SOURCE pixel
+    # format, so a 10-bit master yields High 10 (and, with a logo in the graph,
+    # High 4:4:4 Predictive) unless the mux pins yuv420p.
+    try:
+        _pf = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=pix_fmt,profile", "-of", "csv=p=0",
+             str(out)], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        _pf = ""
+    stats["pix_fmt"] = _pf or "unknown"
+    if _pf and "yuv420p" not in _pf.split(",")[-1]:
+        return DubResult(True, out,
+                         "delivered for review — NOT PLAYABLE on Android "
+                         "(%s); needs yuv420p (FM-015)" % _pf,
+                         stats)
+
     return DubResult(True, out, "released", stats)
 
 
