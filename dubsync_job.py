@@ -594,6 +594,139 @@ def _work_dir_for(hd: Path, dub: Path) -> Path:
     return Path("/opt/dubsync2/work") / h
 
 
+def _probe(path, sel, entries):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", sel,
+                        "-show_entries", entries, "-of", "csv=p=0", str(path)],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def _write_render_report(title, hd, dub, work, out, chunk_rows, anomalies,
+                         vdur, adur, placed, chunks):
+    """Human-readable evidence file for one dialogue-layer render.
+
+    Deliberately records the RAW per-chunk numbers, not just a summary: the
+    13.27s drift that caused the 'whole movie mismatch' was invisible in any
+    summary and obvious in the per-chunk durations.
+    """
+    import datetime, glob, json as _json
+
+    rp = OUT_DIR / f"{title}_report.md"
+    L = []
+    A = L.append
+    A("# Render report — %s" % title)
+    A("")
+    A("- generated: %s" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    A("- mode: **dialogue-layer** (HD master + Somali dialogue overlay)")
+    A("- output: `%s`" % out)
+    try:
+        A("- output size: %.2f GB" % (out.stat().st_size / 1024 ** 3))
+    except OSError:
+        pass
+    A("")
+    A("## Inputs")
+    for tag, f in (("HD ", hd), ("DUB", dub)):
+        try:
+            sz = "%.2f GB" % (Path(f).stat().st_size / 1024 ** 3)
+        except OSError:
+            sz = "?"
+        A("- %s `%s` — %s, %ss, audio %s" % (
+            tag, Path(f).name, sz,
+            _probe(f, "v:0", "format=duration") or "?",
+            _probe(f, "a:0", "stream=sample_rate,channels").replace("\n", " ") or "?"))
+    A("")
+    A("## Anchor map (edl.json — written by `analyze`, single writer)")
+    try:
+        edl = _json.load(open(Path(work) / "edl.json"))["edl"]
+        body = [e for e in edl if not e["is_intro_cluster"] and e["hd_idx"] is not None]
+        ds = [e["dub_start_s"] for e in body]
+        A("- work dir: `%s`" % work)
+        A("- total shots: %d · intro cluster: %d · matched anchors: %d · unmatched: %d"
+          % (len(edl), sum(1 for e in edl if e.get("is_intro_cluster")), len(body),
+             sum(1 for e in edl if not e.get("is_intro_cluster") and e.get("hd_idx") is None)))
+        if ds:
+            A("- dub range covered: %.0fs .. %.0fs" % (min(ds), max(ds)))
+    except Exception as e:
+        A("- could not read edl.json: %s" % e)
+    A("")
+    A("## Per-chunk detail")
+    A("")
+    A("| chunk | HD range | segments | placed | mixed WAV |")
+    A("|---|---|---|---|---|")
+    tmpdirs = sorted(glob.glob("/opt/dubsync2/_scratch/dlg_*"), key=os.path.getmtime)
+    tmp = tmpdirs[-1] if tmpdirs else None
+    total_audio = 0.0
+    for r in chunk_rows:
+        wav = os.path.join(tmp, "mix_%d.wav" % r["idx"]) if tmp else ""
+        d = _probe(wav, "a:0", "format=duration") if wav and os.path.exists(wav) else ""
+        if d:
+            try:
+                total_audio += float(d)
+            except ValueError:
+                pass
+        A("| %d | %.0f–%.0fs | %d | %d | %s |"
+          % (r["idx"], r["hd_start"], r["hd_end"], r["segs"], r["placed"], d or "(cleaned up)"))
+    A("")
+    A("- chunks: **%d** · dialogue segments placed: **%d**" % (chunks, placed))
+    miss = sum(r["segs"] - r["placed"] for r in chunk_rows)
+    A("- segments found but not placed: %d%s" % (
+        miss, " (normal at window edges)" if miss else ""))
+    measured = sum(1 for r in chunk_rows
+                   if tmp and os.path.exists(os.path.join(tmp, "mix_%d.wav" % r["idx"])))
+    if chunk_rows and measured == len(chunk_rows) and total_audio:
+        hd_total = 0.0
+        try:
+            hd_total = float(_probe(hd, "", "format=duration") or 0)
+        except ValueError:
+            pass
+        if hd_total:
+            A("- summed chunk audio: %.3fs vs HD %.3fs → drift **%+.3fs**"
+              % (total_audio, hd_total, total_audio - hd_total))
+        else:
+            A("- summed chunk audio: %.3fs" % total_audio)
+        A("  (compared against the HD duration, never against chunks*300 — the")
+        A("   last chunk is short by design and that formula invents a phantom deficit)")
+    else:
+        # Partial sums lie. Two consecutive reports on the SAME finished
+        # render printed -1389.614s then -1089.614s, because the render
+        # deletes chunk WAVs as it goes. The value tracked cleanup, not
+        # drift. Never compare a partial sum against a full duration.
+        A("- per-chunk drift: not computed — %d of %d chunk WAVs still exist "
+          "(the render deletes them as it goes). A partial sum compared against "
+          "the full HD duration fabricates a large false deficit, so it is omitted. "
+          "**INV-3 below is the authoritative check** — it is computed from the "
+          "delivered file and is unaffected by cleanup."
+          % (measured, len(chunk_rows)))
+    A("")
+    A("## Delivered file checks")
+    if vdur and adur:
+        skew = adur - vdur
+        A("- video %.3fs · audio %.3fs · **INV-3 skew %+.3fs** (tolerance 0.50s) → %s"
+          % (vdur, adur, skew, "PASS" if abs(skew) <= 0.5 else "FAIL"))
+        A("- for reference, the pre-fix drift bug measured **-13.270s** here")
+    else:
+        A("- could not read stream durations")
+    A("")
+    A("## Anomalies")
+    if anomalies:
+        A("The engine reported these during the render:")
+        A("")
+        for a_ in anomalies[:40]:
+            A("- `%s`" % a_)
+    else:
+        A("None. No bed-only fallbacks, separation failures or tracebacks.")
+    A("")
+    A("## What this mode does (and does not) do")
+    A("- Keeps the HD's OWN music, effects and action audio — correct by construction.")
+    A("- Lays only the dub's isolated Somali speech over it.")
+    A("- Does NOT burn in branding, and renders the HD timeline (not the dub cut).")
+    A("- Lip-to-word sync is not achievable for any dub: the picture is an actor")
+    A("  speaking another language. What is achievable is shot/event placement.")
+    A("")
+    rp.write_text("\n".join(L), encoding="utf-8")
+    return rp
+
+
 async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
                                  on_progress, register, cancelled, stats) -> DubResult:
     """HD master + Somali-dialogue overlay (dubsync2 dialogue_layer, --full).
@@ -604,6 +737,17 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
     timeline, not the dub editorial timeline -- the caller states that plainly.
     """
     work = _work_dir_for(hd, dub)
+    # Real denominator for the progress bar. Without this the first chunk
+    # reports 100% (clamped to 99) and the panel sits there for the rest of
+    # the render -- measured on the first end-to-end run.
+    if not stats.get("hd_duration_s"):
+        try:
+            _r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(hd)], capture_output=True, text=True)
+            stats["hd_duration_s"] = float(_r.stdout.strip())
+        except (ValueError, OSError):
+            pass
     if not (work / "edl.json").exists():
         return DubResult(False, None,
                          f"dialogue-layer needs the anchor map; edl.json missing in {work}",
@@ -618,6 +762,8 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
         register(proc)
     placed = 0
     chunks = 0
+    chunk_rows: list[dict] = []
+    anomalies: list[str] = []
     tail: list[str] = []
     assert proc.stdout is not None
     while True:
@@ -627,19 +773,30 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
         line = raw.decode("utf-8", "replace").rstrip()
         tail.append(line)
         del tail[:-25]
+        low = line.lower()
+        if ("bed-only" in low or "separation failed" in low
+                or "traceback" in low or "no space" in low):
+            anomalies.append(line)
         if cancelled():
             try:
                 proc.kill()
             except Exception:
                 pass
             return DubResult(False, None, "cancelled", stats)
-        m = re.search(r"chunk (\d+) HD\[[\d.]+,([\d.]+)\].*?(\d+) placed", line)
+        m = re.search(r"chunk (\d+) HD\[([\d.]+),([\d.]+)\] (\d+) segs, (\d+) placed", line)
         if m:
             chunks += 1
-            placed += int(m.group(3))
+            placed += int(m.group(5))
+            chunk_rows.append({
+                "idx": int(m.group(1)),
+                "hd_start": float(m.group(2)),
+                "hd_end": float(m.group(3)),
+                "segs": int(m.group(4)),
+                "placed": int(m.group(5)),
+            })
             # HD seconds completed / total -> a real percentage for the panel
             try:
-                done_s = float(m.group(2))
+                done_s = float(m.group(3))
                 total_s = float(stats.get("hd_duration_s") or 0) or done_s
                 pct = max(0.0, min(99.0, done_s / total_s * 100.0)) if total_s else 0.0
             except (ValueError, ZeroDivisionError):
@@ -667,6 +824,12 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
             return 0.0
 
     v, a = _dur("v:0"), _dur("a:0")
+    try:
+        rp = _write_render_report(title, hd, dub, work, out, chunk_rows,
+                                  anomalies, v, a, placed, chunks)
+        stats["report"] = str(rp)
+    except Exception as _e:            # a report must never fail the render
+        stats["report_error"] = str(_e)[:200]
     stats["mode"] = "dialogue-layer"
     stats["segments_placed"] = placed
     stats["chunks"] = chunks
