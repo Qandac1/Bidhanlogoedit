@@ -319,6 +319,7 @@ async def run_dubsync(
     max_accidental: float = 90.0,
     register: Optional[Callable[[object], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    mode: str = "conform",
 ) -> DubResult:
     """Run the pipeline, reporting (stage label, overall 0..100) as it goes."""
     out_name = f"{title}_final.mp4"
@@ -391,7 +392,15 @@ async def run_dubsync(
     # weighted evenly so the bar keeps moving through them; unused cycles hand
     # their weight back when the loop exits early.
     queue: list[tuple[str, str, float]] = []
-    for k, l, w in STAGES:
+    if mode == "dlg":
+        # dialogue-layer needs ONLY the anchor map. edl.json has a single
+        # writer -- save_edl() inside `analyze` -- and no later stage
+        # rewrites it, so stage1..stage3-5/plan/dedupe/render add nothing
+        # dialogue_layer can read. Running just `analyze` is both correct
+        # and far cheaper than the full conform.
+        queue.append(("analyze", "\U0001F50D Analysing shots", 1.0))
+    else:
+      for k, l, w in STAGES:
         if k != "repair":
             queue.append((k, l, w))
             continue
@@ -528,6 +537,10 @@ async def run_dubsync(
                         done_weight += queue[j][2]
                         i = j
 
+    if mode == "dlg":
+        return await _render_dialogue_layer(hd, dub, title, on_progress,
+                                            register, _cancelled, stats)
+
     out = OUT_DIR / out_name
     if not out.exists():
         return DubResult(False, None, "render produced no file", stats)
@@ -555,6 +568,116 @@ async def run_dubsync(
     return DubResult(True, out,
                      "released" if released else "delivered for review — integrity gate FAILED (NOT final)",
                      stats)
+
+
+DLG_SCRIPT = "/opt/dubsync2/dialogue_layer.py"
+DLG_PY = "/opt/dubsync2/.venv/bin/python"
+
+
+def _work_dir_for(hd: Path, dub: Path) -> Path:
+    """The engine's own work dir for this pair.
+
+    Mirrors dubsync2 paths.project_hash() and dialogue_layer._proj_hash():
+    sha256 of both file SIZES plus the sha256 of each file's first 100 000
+    bytes, truncated to 12 chars. Resolved by identity, never by name or
+    order -- picking by order is what produced the wrong-movie render.
+    """
+    import hashlib
+
+    def head_sha(f: Path) -> str:
+        with open(f, "rb") as fh:
+            return hashlib.sha256(fh.read(100000)).hexdigest()
+
+    parts = [str(hd.stat().st_size), str(dub.stat().st_size),
+             head_sha(hd), head_sha(dub)]
+    h = hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+    return Path("/opt/dubsync2/work") / h
+
+
+async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
+                                 on_progress, register, cancelled, stats) -> DubResult:
+    """HD master + Somali-dialogue overlay (dubsync2 dialogue_layer, --full).
+
+    Keeps the HD's own music/SFX/action audio and lays ONLY the dub's isolated
+    speech over it, so the fight/impact matching that has no reliable automatic
+    signal never arises. Carries NO burned-in branding and renders the HD
+    timeline, not the dub editorial timeline -- the caller states that plainly.
+    """
+    work = _work_dir_for(hd, dub)
+    if not (work / "edl.json").exists():
+        return DubResult(False, None,
+                         f"dialogue-layer needs the anchor map; edl.json missing in {work}",
+                         stats)
+    out = OUT_DIR / f"{title}_dlg.mp4"
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    cmd = [DLG_PY, "-u", DLG_SCRIPT, "--work", str(work),
+           "--full", "--chunk", "300", "--out", str(out)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    if register:
+        register(proc)
+    placed = 0
+    chunks = 0
+    tail: list[str] = []
+    assert proc.stdout is not None
+    while True:
+        raw = await proc.stdout.readline()
+        if not raw:
+            break
+        line = raw.decode("utf-8", "replace").rstrip()
+        tail.append(line)
+        del tail[:-25]
+        if cancelled():
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return DubResult(False, None, "cancelled", stats)
+        m = re.search(r"chunk (\d+) HD\[[\d.]+,([\d.]+)\].*?(\d+) placed", line)
+        if m:
+            chunks += 1
+            placed += int(m.group(3))
+            # HD seconds completed / total -> a real percentage for the panel
+            try:
+                done_s = float(m.group(2))
+                total_s = float(stats.get("hd_duration_s") or 0) or done_s
+                pct = max(0.0, min(99.0, done_s / total_s * 100.0)) if total_s else 0.0
+            except (ValueError, ZeroDivisionError):
+                pct = 0.0
+            res = on_progress("\U0001F5E3 Laying Somali dialogue", pct)
+            if asyncio.iscoroutine(res):
+                await res
+    await proc.wait()
+    if proc.returncode != 0:
+        return DubResult(False, None,
+                         "dialogue-layer failed (exit %d)\n%s"
+                         % (proc.returncode, " > ".join(tail[-4:])[:500]), stats)
+    if not out.exists() or out.stat().st_size == 0:
+        return DubResult(False, None, "dialogue-layer produced no file", stats)
+
+    # INV-3: the audio must not slide against the picture. A concat bug once
+    # shipped a film whose audio ran 13.27 s short of its video.
+    def _dur(sel: str) -> float:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", sel,
+                            "-show_entries", "stream=duration", "-of", "csv=p=0",
+                            str(out)], capture_output=True, text=True)
+        try:
+            return float(r.stdout.strip())
+        except ValueError:
+            return 0.0
+
+    v, a = _dur("v:0"), _dur("a:0")
+    stats["mode"] = "dialogue-layer"
+    stats["segments_placed"] = placed
+    stats["chunks"] = chunks
+    if v and a:
+        skew = a - v
+        stats["av_skew_s"] = round(skew, 3)
+        if abs(skew) > 0.5:
+            return DubResult(True, out,
+                             "delivered for review — audio/video skew %+.3fs (INV-3)" % skew,
+                             stats)
+    return DubResult(True, out, "released", stats)
 
 
 def _quality_report(title: str) -> dict:

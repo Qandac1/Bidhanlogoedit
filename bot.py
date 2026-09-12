@@ -34,6 +34,7 @@ from branding import (
 )
 from detect import detect_ad_banners
 import delivery
+import trim
 
 uvloop.install()
 logging.basicConfig(level=logging.INFO,
@@ -125,6 +126,134 @@ def _new_work() -> str:
     os.makedirs(w, exist_ok=True)
     return w
 
+# ---- source cache: download a given file ONCE ------------------------------
+# Keyed by Telegram file_unique_id (identical for the same physical file no
+# matter who forwards it). The cached copy is a HARD LINK to the work-dir
+# source, so it costs zero extra disk and survives the work dir being wiped
+# after a render. Auto-capped by size + age so the VPS never fills up.
+SRC_CACHE = os.path.join(settings.work_dir, "_srccache")
+SRC_CACHE_MAX_GB = float(os.getenv("SRC_CACHE_MAX_GB", "25"))
+SRC_CACHE_MAX_AGE_H = float(os.getenv("SRC_CACHE_MAX_AGE_H", "24"))
+WORK_STALE_H = float(os.getenv("WORK_STALE_H", "6"))
+
+
+def _media_key(m: "Message"):
+    """Stable per-file cache key. None => uncacheable."""
+    med = m.video or m.document or getattr(m, "animation", None) or getattr(m, "audio", None)
+    uid = getattr(med, "file_unique_id", None)
+    if uid:
+        return "tg_" + uid
+    mm = re.search(r"https?://mega(?:\.co)?\.nz/\S+", (m.text or m.caption or ""))
+    if mm:
+        import hashlib
+        return "mega_" + hashlib.sha1(mm.group(0).encode()).hexdigest()[:20]
+    return None
+
+
+def _cache_path(key: str) -> str:
+    return os.path.join(SRC_CACHE, key + ".mp4")
+
+
+def _cache_get(key: str, dest: str) -> bool:
+    """Reuse a previously-downloaded file: link (or copy) it to dest. True on hit."""
+    if not key:
+        return False
+    src = _cache_path(key)
+    try:
+        if os.path.exists(src) and os.path.getsize(src) > 0:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if os.path.exists(dest):
+                os.remove(dest)
+            try:
+                os.link(src, dest)
+            except OSError:
+                shutil.copy2(src, dest)
+            try:
+                os.utime(src, None)
+            except OSError:
+                pass
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _cache_put(key: str, src: str) -> None:
+    """Store a freshly downloaded file as a hard link (no extra disk)."""
+    if not key or not src or not os.path.exists(src):
+        return
+    try:
+        os.makedirs(SRC_CACHE, exist_ok=True)
+        dst = _cache_path(key)
+        if os.path.exists(dst):
+            os.utime(dst, None)
+            return
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+    except OSError:
+        return
+    _prune_cache()
+
+
+def _prune_cache() -> None:
+    """Keep the cache under the size + age caps, evicting least-recently-used."""
+    try:
+        files = [os.path.join(SRC_CACHE, f) for f in os.listdir(SRC_CACHE)]
+    except OSError:
+        return
+    now = time.time()
+    max_age = SRC_CACHE_MAX_AGE_H * 3600
+    info = []
+    for fp in files:
+        try:
+            st = os.stat(fp)
+        except OSError:
+            continue
+        if now - st.st_mtime > max_age:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+            continue
+        info.append((st.st_mtime, st.st_size, fp))
+    cap = SRC_CACHE_MAX_GB * (1024 ** 3)
+    total = sum(sz for _mt, sz, _fp in info)
+    if total <= cap:
+        return
+    info.sort()
+    for _mt, sz, fp in info:
+        if total <= cap:
+            break
+        try:
+            os.remove(fp)
+            total -= sz
+        except OSError:
+            pass
+
+
+def _sweep_work(exclude: str = "") -> None:
+    """Remove orphaned work dirs from cancelled/abandoned jobs. Resume re-fetches
+    from Telegram and never reads these, so removing stale ones is safe. Only
+    touches dirs older than WORK_STALE_H, so an active job is never harmed."""
+    try:
+        names = os.listdir(settings.work_dir)
+    except OSError:
+        return
+    now = time.time()
+    stale = WORK_STALE_H * 3600
+    for n in names:
+        fp = os.path.join(settings.work_dir, n)
+        if fp == exclude or n == "_srccache" or not os.path.isdir(fp):
+            continue
+        try:
+            if now - os.path.getmtime(fp) > stale:
+                shutil.rmtree(fp, ignore_errors=True)
+        except OSError:
+            pass
+
+
 CORNER_CYCLE = ["TL", "TR", "BR", "BL"]
 SCALE_CYCLE = [0.8, 0.9, 1.0, 1.1, 1.25]
 # horizontal offset presets for the left Bidhaan, to clear whatever logo the
@@ -162,6 +291,10 @@ DEFAULTS = {
     "bidhaan2_frac": 0.132, "bidhaan2_mx": 0.038, "bidhaan2_my": 0.10,
     "logo_scale": 1.0,           # global multiplier on logo sizes
     "custom_logo": "",           # per-user uploaded logo (empty = default bidhaan.png)
+    # video trim applied BEFORE render (fast stream-copy). off = no trim.
+    "trim_mode": "off",          # off | head | tail | range | cut
+    "trim_a": 0.0,               # seconds: head/tail amount, or range/cut start
+    "trim_b": 0.0,               # seconds: range/cut end
 }
 
 
@@ -248,6 +381,8 @@ def _asset(name: str) -> str:
 LOGO_DIR = os.path.join(DATA_DIR, "user_logos")
 _awaiting_logo: set[int] = set()   # uids who ran /logo and owe us an image
 _awaiting_time: dict = {}          # uid -> {key,msg,job} while typing a start/end
+_awaiting_trim: dict = {}          # uid -> {mode,target,panel_msg} while typing a trim value
+_trim_target: dict = {}            # uid -> {"msg": <video msg>} for the standalone /trim panel
 
 _TIME_LABELS = {
     "logo_start_min": "Logo start", "logo_end_min": "Logo end",
@@ -283,7 +418,173 @@ def _user_logo(c: dict) -> str:
     p = c.get("custom_logo")
     if p and os.path.exists(p):
         return p
-    return _user_logo(c)
+    return _asset(settings.logo_tl)
+
+
+# ---- standalone video trimmer (/trim) — fast, no re-encode -----------------
+def _trim_panel_kb() -> IKM:
+    return IKM([
+        [IKB("✂️ Cut first 1m", "trx:head:60"), IKB("2m", "trx:head:120"),
+         IKB("5m", "trx:head:300")],
+        [IKB("✂️ Cut last 1m", "trx:tail:60"), IKB("2m", "trx:tail:120")],
+        [IKB("✏️ Cut first…", "trx:type:head"), IKB("✏️ Cut last…", "trx:type:tail")],
+        [IKB("✏️ Keep range…", "trx:type:range"), IKB("✏️ Cut section…", "trx:type:cut")],
+        [IKB("❌ Cancel", "trx:cancel")],
+    ])
+
+
+def _trim_target_of(m: "Message"):
+    """The video this /trim refers to: sent WITH the command, or replied-to."""
+    if m.video or m.document:
+        return m
+    r = m.reply_to_message
+    if r and (r.video or r.document):
+        return r
+    return None
+
+
+def _trim_args(args: list):
+    """Parse typed /trim args -> (mode, a_sec, b_sec) or None."""
+    if not args:
+        return None
+    a = [x.lower() for x in args]
+
+    def sec(x):
+        mn = _parse_time_min(x)
+        return None if mn is None else mn * 60.0
+
+    if a[0] in ("first", "head", "intro", "start") and len(a) >= 2:
+        s = sec(a[1]); return ("head", s, 0.0) if s else None
+    if a[0] in ("last", "tail", "end", "outro") and len(a) >= 2:
+        s = sec(a[1]); return ("tail", s, 0.0) if s else None
+    if a[0] in ("keep", "range") and len(a) >= 3:
+        s, e = sec(a[1]), sec(a[2])
+        return ("range", s, e) if (s is not None and e) else None
+    if a[0] in ("cut", "remove", "delete") and len(a) >= 3:
+        s, e = sec(a[1]), sec(a[2])
+        return ("cut", s, e) if (s is not None and e) else None
+    if len(a) >= 2:                              # bare "A B" => keep range
+        s, e = sec(a[0]), sec(a[1])
+        if s is not None and e:
+            return ("range", s, e)
+    return None
+
+
+async def _do_trim(uid: int, target_msg: "Message", mode: str,
+                   a: float, b: float, status: "Message") -> None:
+    """Download (cache-aware) -> fast stream-copy trim -> deliver. No re-encode."""
+    work = None
+    try:
+        try:
+            job = await _build_job(uid, target_msg, status)
+        except Exception as e:
+            if _active.get(uid, {}).get("cancelled"):
+                await status.edit("🛑 Cancelled.")
+            else:
+                log.exception("trim download failed")
+                await status.edit(f"❌ Failed: `{str(e)[:300]}`")
+            return
+        src, work, dur = job["src"], job["work"], job["duration"]
+        out = os.path.join(work, "trimmed.mp4")
+        _act(uid).update(proc=None, cancelled=False, phase="Trim",
+                         task=asyncio.current_task())
+        try:
+            await status.edit("✂️ Trimming (fast, no re-encode)…")
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(trim.apply, src, out, mode, a, b, dur,
+                                    lambda pr: _act(uid).__setitem__("proc", pr))
+        except ValueError as e:
+            await status.edit(f"⚠️ {e}")
+            return
+        except Exception as e:
+            if _act(uid).get("cancelled"):
+                await status.edit("🛑 Trim cancelled.")
+            else:
+                log.exception("trim failed")
+                await status.edit(f"❌ Trim failed: `{str(e)[:300]}`")
+            return
+        if not os.path.exists(out) or os.path.getsize(out) == 0:
+            await status.edit("❌ Trim produced no output.")
+            return
+        ow, oh, odur = await asyncio.to_thread(probe, out)
+        sz = os.path.getsize(out)
+        base = os.path.splitext(os.path.basename(job["name"]))[0]
+        name = f"{base}.mp4"
+        cap = f"{base}.mp4\n✂️ Trimmed — {_fmt_hms(odur)} • {human_size(sz)}"
+        os.makedirs(OUTBOX, exist_ok=True)
+        saved = os.path.join(OUTBOX, f"{int(time.time())}_{uid}_{name}")
+        await asyncio.to_thread(shutil.move, out, saved)
+        entry = {"path": saved, "name": name, "cap": cap, "w": ow, "h": oh,
+                 "dur": odur, "size": sz, "ts": time.time()}
+        _add_pending(uid, entry)
+        if await _deliver_file(uid, entry, status, target_msg):
+            _remove_pending(uid, saved)
+            try:
+                os.remove(saved)
+            except OSError:
+                pass
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        else:
+            await status.edit(
+                f"💾 **Saved on the server** ({human_size(sz)}) — couldn't deliver now "
+                f"(over 2GB / MEGA full / no delivery set up). Free space or run "
+                f"/loginpremium, then send **/deliver**.  (/files to see what's waiting.)")
+    finally:
+        _active.pop(uid, None)
+        if work:
+            try:
+                for root, _d, files in os.walk(work, topdown=False):
+                    for f in files:
+                        os.remove(os.path.join(root, f))
+                    os.rmdir(root)
+            except OSError:
+                pass
+
+
+async def _handle_trim_input(m: "Message", uid: int) -> None:
+    info = _awaiting_trim.pop(uid, None) or {}
+    mode = info.get("mode")
+    panel_ctx = info.get("ctx") == "panel"
+
+    def sec(x):
+        mn = _parse_time_min(x)
+        return None if mn is None else mn * 60.0
+
+    toks = (m.text or "").split()
+    if mode in ("head", "tail"):
+        sv = sec(toks[0]) if toks else None
+        if sv is None:
+            return await m.reply("Couldn't read that. Try `60s`, `2m`, `1:30`.")
+        a, b = sv, 0.0
+    else:
+        if len(toks) < 2:
+            return await m.reply("Give TWO times, e.g. `1:00 5:00`.")
+        sv, ev = sec(toks[0]), sec(toks[1])
+        if sv is None or ev is None:
+            return await m.reply("Couldn't read those. Try `1:00 5:00`.")
+        a, b = sv, ev
+    if panel_ctx:
+        set_user(uid, trim_mode=mode, trim_a=a, trim_b=b)
+        await m.reply(f"✅ Trim set — {_trim_label(mode, a, b)}. Applies when you Render.")
+        pm, job = info.get("panel_msg"), info.get("job")
+        if pm is not None:
+            try:
+                await pm.edit_text("✂️ **Trim** — pick a cut:",
+                                   reply_markup=submenu("trim", uid, job))
+            except Exception:
+                pass
+        return
+    tgt = info.get("target")
+    if not tgt:
+        return await m.reply("Send the video again with /trim.")
+    _trim_target.pop(uid, None)
+    status = await m.reply("✂️ Preparing…")
+    await _do_trim(uid, tgt, mode, a, b, status)
 
 
 # ---- access control: owner + an owner-managed allowlist of authorized ids ----
@@ -468,6 +769,7 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
         [IKB("🖼 Resolution", "m:res"), IKB("🎞 FPS", "m:fps")],
         [IKB("🏷 Logo positions", "m:logos")],
         [IKB("▶️ Start times (skip intro)", "m:starts")],
+        [IKB(f"✂️ Trim: {_trim_short(c)}", "m:trim")],
         [IKB(f"🟥 Cover: {c['cover_mode']}", "cover:toggle")],
         [IKB("✅ Render now", "go"), IKB("❌ Cancel", "cancel")],
     ]
@@ -476,6 +778,24 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
 
 def _back_row():
     return [IKB("⬅ Back", "m:main")]
+
+
+def _trim_label(mode: str, a: float, b: float) -> str:
+    if not mode or mode == "off":
+        return "off"
+    if mode == "head":
+        return f"cut first {_fmt_time(a / 60)}"
+    if mode == "tail":
+        return f"cut last {_fmt_time(a / 60)}"
+    if mode == "range":
+        return f"keep {_fmt_time(a / 60)}→{_fmt_time(b / 60)}"
+    if mode == "cut":
+        return f"remove {_fmt_time(a / 60)}→{_fmt_time(b / 60)}"
+    return mode
+
+
+def _trim_short(c: dict) -> str:
+    return _trim_label(c.get("trim_mode", "off"), c.get("trim_a", 0.0), c.get("trim_b", 0.0))
 
 
 def submenu(which: str, uid: int, job: dict) -> IKM:
@@ -543,6 +863,27 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
         rows += _block("📝 Caption", "text_start_min", "text_end_min")
         rows += [[IKB("⏱ ✏️ then type: 30s · 1:23 · 1:57:00", "noop")], _back_row()]
         return IKM(rows)
+    if which == "trim":
+        tm = c.get("trim_mode", "off")
+        ta = c.get("trim_a", 0.0)
+
+        def _hd(sc, lbl):
+            on = (tm == "head" and abs(ta - sc) < 0.5)
+            return IKB(("✅ " if on else "") + lbl, f"tm:head:{int(sc)}")
+
+        def _tl(sc, lbl):
+            on = (tm == "tail" and abs(ta - sc) < 0.5)
+            return IKB(("✅ " if on else "") + lbl, f"tm:tail:{int(sc)}")
+
+        rows = [
+            [IKB(("✅ " if tm == "off" else "") + "Off", "tm:off"),
+             _hd(60, "first 1m"), _hd(120, "first 2m"), _hd(300, "first 5m")],
+            [_tl(60, "last 1m"), _tl(120, "last 2m")],
+            [IKB("✏️ Cut first…", "tm:type:head"), IKB("✏️ Cut last…", "tm:type:tail")],
+            [IKB("✏️ Keep range…", "tm:type:range"), IKB("✏️ Cut section…", "tm:type:cut")],
+            _back_row(),
+        ]
+        return IKM(rows)
     if which == "logos":
         sn = f"StreamNxt: {c['streamnxt_corner']} {'on' if c['streamnxt_on'] else 'OFF'}"
         bd = f"Bidhaan R: {c['bidhaan_corner']} {'on' if c['bidhaan_on'] else 'OFF'}"
@@ -604,6 +945,32 @@ HELP = (
     "👑 **Owner only:** `/allow <id>` · `/deny <id>` · `/users` — manage who can "
     "use the bot.\n"
 )
+
+
+@app.on_message(filters.command("trim") & filters.private)
+async def _trim_cmd(_, m: Message):
+    uid = m.from_user.id
+    if not _allowed(uid):
+        return
+    tgt = _trim_target_of(m)
+    if tgt is None:
+        return await m.reply(
+            "✂️ **Trim a video** (fast, no re-encode)\n\n"
+            "• Reply **/trim** to a video, or send a video with the caption **/trim** "
+            "→ a button panel appears.\n\n"
+            "Or type it directly:\n"
+            "`/trim first 60s`  — drop the first minute (intro)\n"
+            "`/trim last 30s`  — drop the last 30s (outro)\n"
+            "`/trim keep 1:00 5:00`  — keep only 1:00→5:00\n"
+            "`/trim cut 2:00 2:30`  — remove a promo in the middle")
+    spec = _trim_args(m.command[1:])
+    if spec:
+        mode, a, b = spec
+        status = await m.reply("✂️ Preparing…")
+        return await _do_trim(uid, tgt, mode, a, b, status)
+    _trim_target[uid] = {"msg": tgt}
+    await m.reply("✂️ **Trim** — pick a cut (fast, no re-encode):",
+                  reply_markup=_trim_panel_kb())
 
 
 @app.on_message(filters.command(["start", "help"]) & filters.private)
@@ -1042,6 +1409,8 @@ async def _logoutpremium(_, m: Message):
 @app.on_message(filters.text & filters.private & ~filters.regex(r"^/"))
 async def _login_text(_, m: Message):
     uid = m.from_user.id
+    if uid in _awaiting_trim:
+        return await _handle_trim_input(m, uid)
     if uid in _awaiting_time:
         return await _handle_time_input(m, uid)
     if not _allowed(uid) or uid not in _login:
@@ -1467,7 +1836,8 @@ async def _dubflow_take(uid: int, m: Message) -> bool:
     # The user told us which is which, so trust that ordering rather than
     # guessing from resolution — Swap on the confirm panel is still there if
     # they sent them the wrong way round.
-    _dubsel[uid] = {"msgs": msgs, "hd_i": 0, "brand": True, "panel": None}
+    _dubsel[uid] = {"msgs": msgs, "hd_i": 0, "brand": True, "panel": None,
+                    "mode": "conform"}
     try:
         panel = await fl["prompt"].edit(_dub_panel_text(uid),
                                         reply_markup=_dub_panel_kb(uid))
@@ -1579,6 +1949,7 @@ def _dub_panel_kb(uid: int) -> IKM:
     Cover is omitted: a clean HD master has no broadcaster banner to hide."""
     sel = _dubsel.get(uid) or {}
     brand_on = sel.get("brand", True)
+    mode_ = sel.get("mode", "conform")
     rows = [
         [IKB("⏱ Scroll time", "m:scroll"), IKB("🔁 Times", "m:times")],
         [IKB("📐 Bitrate", "m:br"), IKB("🎯 Target size", "m:size")],
@@ -1587,6 +1958,9 @@ def _dub_panel_kb(uid: int) -> IKM:
         [IKB("▶️ Start times (skip intro)", "m:starts")],
         [IKB("🔄 Swap HD ⇄ Dub", "dub:swap"),
          IKB(("🏷 Branding: ON" if brand_on else "🏷 Branding: OFF"), "dub:brand")],
+        [IKB(("\U0001F3AC Mode: Conform (branded)" if mode_ == "conform"
+              else "\U0001F5E3 Mode: Dialogue-layer (HD audio, no branding)"),
+             "dub:mode")],
         [IKB("✅ Start dub-sync", "dub:start"), IKB("❌ Cancel", "dub:cancel")],
     ]
     return IKM(rows)
@@ -1723,6 +2097,43 @@ async def _cb(_, cq: CallbackQuery):
     job = _pending.get(uid)
     data = cq.data
 
+    if data.startswith("trx:"):
+        parts = data.split(":")
+        act = parts[1]
+        if act == "cancel":
+            _trim_target.pop(uid, None)
+            _awaiting_trim.pop(uid, None)
+            try:
+                await cq.message.edit("✂️ Trim cancelled.")
+            except Exception:
+                pass
+            return await cq.answer()
+        tgt = (_trim_target.get(uid) or {}).get("msg")
+        if tgt is None:
+            return await cq.answer("Send the video again with /trim.", show_alert=True)
+        if act == "type":
+            mode = parts[2]
+            _awaiting_trim[uid] = {"mode": mode, "target": tgt, "panel_msg": cq.message}
+            two = mode in ("range", "cut")
+            what = {"head": "cut from the START", "tail": "cut from the END",
+                    "range": "KEEP range (start end)",
+                    "cut": "SECTION to remove (start end)"}[mode]
+            await cq.message.edit_text(
+                f"✏️ Type the **{what}** and send it.\n\n"
+                "Examples:  `60s`  ·  `2m`  ·  `1:30`" +
+                ("  ·  two times: `1:00 5:00`" if two else "  ·  `0` cancels"))
+            return await cq.answer()
+        mode = act
+        avel = float(parts[2]) if len(parts) > 2 else 0.0
+        _trim_target.pop(uid, None)
+        await cq.answer("Trimming…")
+        try:
+            await cq.message.edit_text("✂️ Preparing…")
+        except Exception:
+            pass
+        asyncio.create_task(_do_trim(uid, tgt, mode, avel, 0.0, cq.message))
+        return
+
     if data.startswith("tset:"):
         key = data.split(":", 1)[1]
         _awaiting_time[uid] = {"key": key, "msg": cq.message, "job": job}
@@ -1771,7 +2182,8 @@ async def _cb(_, cq: CallbackQuery):
         # can easily be the larger file.
         a, b = _vmeta(msgs[0]), _vmeta(msgs[1])
         hd_i = 0 if (a[1] * a[2]) >= (b[1] * b[2]) else 1
-        _dubsel[uid] = {"msgs": msgs, "hd_i": hd_i, "brand": True, "panel": None}
+        _dubsel[uid] = {"msgs": msgs, "hd_i": hd_i, "brand": True, "panel": None,
+                        "mode": "conform"}
         await cq.answer()
         panel = await cq.message.edit(_dub_panel_text(uid),
                                       reply_markup=_dub_panel_kb(uid))
@@ -1810,17 +2222,28 @@ async def _cb(_, cq: CallbackQuery):
             sel["brand"] = not sel.get("brand", True)
             await _refresh_dub_panel(uid)
             return await cq.answer("Branding " + ("on" if sel["brand"] else "off"))
+        if act == "mode":
+            # Per-job choice, like Branding. conform = the long-standing
+            # path (dub editorial timeline, branding burned in).
+            # dlg = HD master + Somali dialogue only: keeps the HD music/
+            # SFX/action audio, but NO branding and the HD timeline.
+            sel["mode"] = "dlg" if sel.get("mode", "conform") == "conform" else "conform"
+            await _refresh_dub_panel(uid)
+            return await cq.answer(
+                "Dialogue-layer (HD audio, no branding)" if sel["mode"] == "dlg"
+                else "Conform (branded)")
         if act == "start":
             msgs = sel["msgs"]
             hd_i = sel["hd_i"]
             brand = sel.get("brand", True)
+            dub_mode = sel.get("mode", "conform")
             _dubsel.pop(uid, None)
             await cq.answer("Starting…")
             try:
                 await cq.message.edit("🎬 **Dub-sync starting…**")
             except Exception:
                 pass
-            asyncio.create_task(_run_dubsync(uid, msgs, hd_i, brand))
+            asyncio.create_task(_run_dubsync(uid, msgs, hd_i, brand, dub_mode))
             return
         return await cq.answer()
 
@@ -1877,6 +2300,30 @@ async def _cb(_, cq: CallbackQuery):
                 w, h = val.split("x")
                 set_user(uid, width=int(w), height=int(h))
         await _refresh_active_panel(cq, uid, job)
+        return await cq.answer("✓")
+
+    if data.startswith("tm:"):
+        parts = data.split(":")
+        act = parts[1]
+        if act == "off":
+            set_user(uid, trim_mode="off", trim_a=0.0, trim_b=0.0)
+        elif act in ("head", "tail"):
+            set_user(uid, trim_mode=act, trim_a=float(parts[2]), trim_b=0.0)
+        elif act == "type":
+            mode = parts[2]
+            _awaiting_trim[uid] = {"mode": mode, "ctx": "panel",
+                                   "panel_msg": cq.message, "job": job}
+            two = mode in ("range", "cut")
+            what = {"head": "seconds/time to cut from the START",
+                    "tail": "seconds/time to cut from the END",
+                    "range": "KEEP range (two times: start end)",
+                    "cut": "SECTION to remove (two times: start end)"}[mode]
+            await cq.message.edit_text(
+                f"✏️ Type the **{what}** and send it.\n\n"
+                "Examples:  `60s`  ·  `2m`  ·  `1:30`" +
+                ("  ·  two times: `1:00 5:00`" if two else ""))
+            return await cq.answer()
+        await cq.message.edit_reply_markup(submenu("trim", uid, job))
         return await cq.answer("✓")
 
     if data.startswith("lg:"):
@@ -1960,7 +2407,7 @@ def _brand_payload(uid: int) -> dict:
 
 
 async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
-                       brand: bool = True) -> None:
+                       brand: bool = True, mode: str = "conform") -> None:
     """Conform an HD master to a Somali dub, branded in the same single pass."""
     import dubsync_job
 
@@ -2050,6 +2497,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         _vk, _ = _fit_bitrate(_vk, _dur, c["audio_k"])
         res = await dubsync_job.run_dubsync(
             hd, dub, title, (_brand_payload(uid) if brand else None),
+            mode=mode,
             width=ow, height=oh, crf=settings.x264_crf,
             bitrate_k=_vk,
             on_progress=on_prog,
@@ -2185,9 +2633,21 @@ async def _build_job(uid: int, m: Message, status: Message,
     """Download the file (Telegram video/doc OR a MEGA link in the message) to a
     FRESH work dir, probe it, return a job dict. Raises on failure/cancel."""
     work = _new_work()
+    _sweep_work(work)
     dest = os.path.join(work, "src.mp4")
     mo = re.search(r"https?://mega(?:\.co)?\.nz/\S+", (m.text or m.caption or ""))
-    if mo:
+    # download-once: reuse the bytes if we already fetched this exact file
+    # (e.g. you cancelled a render and forwarded the same movie again).
+    ckey = _media_key(m)
+    cache_hit = bool(ckey) and _cache_get(ckey, dest)
+    if cache_hit:
+        try:
+            await status.edit("♻️ Already downloaded — using the saved copy "
+                              "(no re-download).")
+        except Exception:
+            pass
+        path, name = dest, _derive_name(m)
+    elif mo:
         dlt = _Throttle()
         loop = asyncio.get_event_loop()
 
@@ -2239,6 +2699,8 @@ async def _build_job(uid: int, m: Message, status: Message,
         if not path:
             path = await m.download(file_name=dest, progress=_dlp)
         name = _derive_name(m)
+    if not cache_hit and ckey and path:
+        _cache_put(ckey, path)
     w, h, dur = await asyncio.to_thread(probe, path)
     return {"src": path, "work": work, "w": w, "h": h, "duration": dur,
             "name": name, "msg": m}
@@ -2285,7 +2747,8 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
                         pass
             await status.edit(f"⬆️ Uploading… ({human_size(sz)})")
             await reply_to.reply_video(out, duration=int(odur), width=ow, height=oh,
-                                       supports_streaming=True, caption=cap, progress=_ulp)
+                                       supports_streaming=True, caption=cap,
+                                       file_name=name, progress=_ulp)
             return True
         except Exception as e:
             errors.append(f"Telegram: {str(e)[:150]}")
@@ -2364,6 +2827,27 @@ async def _render_job(uid: int, job: dict, status: Message):
         c = user_cfg(uid)
         src, work, dur = job["src"], job["work"], job["duration"]
         try:
+            # optional pre-render trim (fast stream-copy, no re-encode) so
+            # covers/caption/logo all align to the trimmed footage.
+            if c.get("trim_mode", "off") != "off":
+                try:
+                    await status.edit("✂️ Trimming before render…")
+                except Exception:
+                    pass
+                try:
+                    tout = os.path.join(work, "pretrim.mp4")
+                    await asyncio.to_thread(
+                        trim.apply, src, tout, c["trim_mode"],
+                        float(c.get("trim_a", 0.0)), float(c.get("trim_b", 0.0)),
+                        dur, lambda pr: _act(uid).__setitem__("proc", pr))
+                    if os.path.exists(tout) and os.path.getsize(tout) > 0:
+                        src = tout
+                        _tw, _th, dur = await asyncio.to_thread(probe, src)
+                        job["duration"] = dur
+                except ValueError:
+                    pass
+                except Exception:
+                    log.exception("pre-render trim failed; using full video")
             # detection at render time (adaptive fps for long videos)
             events = []
             if c["cover_mode"] == "auto":
@@ -2474,8 +2958,8 @@ async def _render_job(uid: int, job: dict, status: Message):
 
             ow, oh, odur = await asyncio.to_thread(probe, out)
             sz = os.path.getsize(out)
-            cap = f"✅ Branded — {len(events)} banner(s) covered • {human_size(sz)}"
             name = os.path.splitext(os.path.basename(job['name']))[0] + ".mp4"
+            cap = f"{name}\n✅ Branded — {len(events)} banner(s) covered • {human_size(sz)}"
 
             # PRESERVE the finished file in a persistent outbox BEFORE trying to
             # deliver it — so it's NEVER lost if delivery fails (MEGA full, over
@@ -2723,6 +3207,10 @@ async def _main() -> None:
     from pyrogram import idle
     await app.start()
     log.info("Bidhaan Logo-Edit bot started; checking for unfinished batches…")
+    try:
+        _sweep_work(); _prune_cache()
+    except Exception:
+        log.exception("startup cache/work cleanup failed")
     try:
         await _notify_pending_on_startup()
     except Exception:
