@@ -1949,7 +1949,7 @@ def _dub_panel_kb(uid: int) -> IKM:
     Cover is omitted: a clean HD master has no broadcaster banner to hide."""
     sel = _dubsel.get(uid) or {}
     brand_on = sel.get("brand", True)
-    mode_ = sel.get("mode", "conform")
+    mode_ = sel.get("mode", "auto")
     rows = [
         [IKB("⏱ Scroll time", "m:scroll"), IKB("🔁 Times", "m:times")],
         [IKB("📐 Bitrate", "m:br"), IKB("🎯 Target size", "m:size")],
@@ -1958,8 +1958,10 @@ def _dub_panel_kb(uid: int) -> IKM:
         [IKB("▶️ Start times (skip intro)", "m:starts")],
         [IKB("🔄 Swap HD ⇄ Dub", "dub:swap"),
          IKB(("🏷 Branding: ON" if brand_on else "🏷 Branding: OFF"), "dub:brand")],
-        [IKB(("\U0001F3AC Mode: Conform (branded)" if mode_ == "conform"
-              else "\U0001F5E3 Mode: Dialogue-layer (HD audio + branding)"),
+        [IKB({"auto": "🧠 Mode: Auto (measured per film)",
+              "conform": "🎬 Mode: Conform (branded)",
+              "dlg": "🗣 Mode: Dialogue-layer (HD audio + branding)"}
+             .get(mode_, "🧠 Mode: Auto (measured per film)"),
              "dub:mode")],
         [IKB("✅ Start dub-sync", "dub:start"), IKB("❌ Cancel", "dub:cancel")],
     ]
@@ -2230,16 +2232,23 @@ async def _cb(_, cq: CallbackQuery):
             # here TOO now -- it rides the mux's existing video re-encode, so
             # it costs no extra pass -- which makes this choice about AUDIO
             # and TIMELINE, not about giving up the logos and caption.
-            sel["mode"] = "dlg" if sel.get("mode", "conform") == "conform" else "conform"
+            # Three states now. AUTO is the default because John asked for logic
+            # that decides without being told: it runs `analyze`, measures whether
+            # the Somali dub is a CUT version of the HD master, and picks the mode
+            # from that evidence (FM-042). The explicit choices remain available and
+            # are never overridden -- picking conform or dlg by hand still forces it.
+            _cyc = {"auto": "conform", "conform": "dlg", "dlg": "auto"}
+            sel["mode"] = _cyc.get(sel.get("mode", "auto"), "conform")
             await _refresh_dub_panel(uid)
             return await cq.answer(
-                "Dialogue-layer (HD audio + branding)" if sel["mode"] == "dlg"
-                else "Conform (branded)")
+                {"auto": "Auto — measured per film (recommended)",
+                 "dlg": "Dialogue-layer (HD audio + branding)",
+                 "conform": "Conform (branded)"}[sel["mode"]])
         if act == "start":
             msgs = sel["msgs"]
             hd_i = sel["hd_i"]
             brand = sel.get("brand", True)
-            dub_mode = sel.get("mode", "conform")
+            dub_mode = sel.get("mode", "auto")
             _dubsel.pop(uid, None)
             await cq.answer("Starting…")
             try:

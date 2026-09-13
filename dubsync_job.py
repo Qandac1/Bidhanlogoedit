@@ -408,6 +408,9 @@ async def run_dubsync(
     # weighted evenly so the bar keeps moving through them; unused cycles hand
     # their weight back when the loop exits early.
     queue: list[tuple[str, str, float]] = []
+    # "auto" takes the conform queue because STAGES already begins with analyze;
+    # the early exit below turns it into a dlg job the moment measurement says so.
+    # No queue surgery, and the dlg/conform paths stay byte-identical.
     if mode == "dlg":
         # dialogue-layer needs ONLY the anchor map. edl.json has a single
         # writer -- save_edl() inside `analyze` -- and no later stage
@@ -553,6 +556,18 @@ async def run_dubsync(
                         done_weight += queue[j][2]
                         i = j
 
+        # --- AUTO MODE: decide as soon as the evidence exists ----------------
+        # analyze has just written edl.json, so this is the earliest honest point
+        # to choose. Picking dlg here skips every remaining conform stage, which
+        # is also why auto costs nothing extra on a film that wants dlg.
+        if mode == "auto" and key == "analyze":
+            picked, why = _pick_mode(hd, dub)
+            stats["auto_mode"] = picked
+            stats["auto_why"] = why
+            if picked == "dlg":
+                mode = "dlg"
+                break
+
     if mode == "dlg":
         return await _render_dialogue_layer(hd, dub, title, on_progress,
                                             register, _cancelled, stats,
@@ -609,6 +624,40 @@ def _work_dir_for(hd: Path, dub: Path) -> Path:
              head_sha(hd), head_sha(dub)]
     h = hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
     return Path("/opt/dubsync2/work") / h
+
+
+def _pick_mode(hd: Path, dub: Path) -> tuple[str, str]:
+    """Choose conform vs dialogue-layer by MEASURING this pair. Returns (mode, why).
+
+    Must run AFTER `analyze`: the evidence is edl.json, which analyze writes.
+
+    dialogue_layer renders the HD master end to end -- its --full loop walks
+    H = 0 -> hd_total with no skip logic -- so footage the Somali release CUT is put
+    back by a dlg render. conform follows the dub's editorial timeline and excludes it
+    by construction. dub_cut_check.py measures interior HD that no dub time maps into,
+    which is the footprint a removed scene leaves behind (FM-042).
+
+    Falls back to dlg on any failure: that is the mode every approved film used, so an
+    unmeasurable pair behaves exactly as it did before this function existed.
+    """
+    work = _work_dir_for(hd, dub)
+    try:
+        r = subprocess.run(
+            [DLG_PY, "/opt/dubsync2/dub_cut_check.py", "--caption", str(work)],
+            capture_output=True, text=True, timeout=120)
+        line = (r.stdout or "").strip().splitlines()[0]
+        picked, worst, total, n = line.split("|")
+    except Exception as exc:
+        return "dlg", "coverage unmeasurable (%s); using dialogue-layer" % type(exc).__name__
+    if picked == "conform":
+        return "conform", (
+            "the dub is a CUT version: %ss of HD across %s stretches (worst %ss) is "
+            "footage it never covers, so the HD timeline would put it back" % (total, n, worst))
+    if picked == "ask":
+        return "conform", (
+            "%ss of HD across %s stretches (worst %ss) is uncovered -- borderline, so "
+            "the dub's own timeline is the safer choice" % (total, n, worst))
+    return "dlg", "the dub follows its HD master (no uncovered interior footage)"
 
 
 def _probe(path, sel, entries):
