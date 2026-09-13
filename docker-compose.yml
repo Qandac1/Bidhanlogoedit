@@ -3,6 +3,7 @@ services:
     build: .
     container_name: bidhaan-logoedit
     restart: unless-stopped
+    cpus: 6            # hard CPU cap so one render can never thrash the box
     env_file: .env
     environment:
       - TZ=UTC
