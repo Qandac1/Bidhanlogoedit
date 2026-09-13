@@ -879,6 +879,28 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
         stats["branding"] = "on"
     else:
         stats["branding"] = "off"
+
+    # Cut what the HD does not contain -- John standing rule, so an intro or outro
+    # spliced into the dub never reaches a delivered film again. nohd_spans finds
+    # runs where the film stops advancing while the dub keeps going (an intro, an
+    # outro, or an advert), and a tail run is extended to the end of the dub.
+    # Validated across 23 work dirs: the approved films (WTTJ, Badla, The Comeback,
+    # Tammal, Jumper, Dial) all come back clean, and it refuses any film whose edl
+    # claims more dub than the dub file holds.
+    # FAILS OPEN: any error, or no spans, and the render proceeds exactly as before.
+    try:
+        import subprocess as _sp
+        _r = _sp.run([DLG_PY, "/opt/dubsync2/nohd_spans.py", work.name, "--write"],
+                     capture_output=True, text=True, timeout=300)
+        _spans = work / "nohd_spans.json"
+        if _spans.exists():
+            import json as _json
+            _n = len((_json.load(open(_spans)) or {}).get("promos") or [])
+            if _n:
+                cmd += ["--promo-json", str(_spans)]
+                stats["nohd_spans"] = _n
+    except Exception as _exc:
+        stats["nohd_spans"] = "skipped (%s)" % type(_exc).__name__
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     if register:
