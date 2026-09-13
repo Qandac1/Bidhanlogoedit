@@ -890,17 +890,44 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
     # FAILS OPEN: any error, or no spans, and the render proceeds exactly as before.
     try:
         import subprocess as _sp
-        _r = _sp.run([DLG_PY, "/opt/dubsync2/nohd_spans.py", work.name, "--write"],
-                     capture_output=True, text=True, timeout=300)
-        _spans = work / "nohd_spans.json"
+        import json as _json
+        # A STALE active set must never survive (FM-079). If this run's union refuses --
+        # say the spans would exceed 10% of the dub -- an old file left in place would be
+        # used instead, and yesterday's verdict would cut today's film. Remove it first so
+        # a refusal fails open to NO exclusions rather than to the previous answer.
+        try:
+            (work / "spans_active.json").unlink()
+        except OSError:
+            pass
+
+        # 1. Collapse spans: intros and outros the HD does not contain.
+        #    HEAD/TAIL ONLY -- mid-film is refused, because a collapse there can be a
+        #    matcher failure over REAL dialogue. Ghost's would have cut 81s of John's
+        #    speech: its vocals measured -17.4 dB against dialogue at -16.4 dB (FM-069).
+        _sp.run([DLG_PY, "/opt/dubsync2/nohd_spans.py", work.name, "--write"],
+                capture_output=True, text=True, timeout=600)
+
+        # 2. Adverts: card-likeness AND positive OCR promotional text, BOTH required.
+        #    Catches the SHORT promos that sit under nohd_spans' 30s floor (Ghost's
+        #    22s/25s/6s). Tested across 7 approved films: 12 stage-1 candidates, ALL
+        #    rejected by the text stage, 0 false positives (FM-078). Costs 6-17s against
+        #    a ~2.5h render.
+        _sp.run([DLG_PY, "/opt/dubsync2/promo_detect.py", str(work), "--write"],
+                capture_output=True, text=True, timeout=900)
+
+        # 3. One active set: sorted union, overlaps kept, NEVER merged and re-judged
+        #    (FM-068b -- merging averaged two criteria together and refused both).
+        _sp.run([DLG_PY, "/opt/dubsync2/spans_union.py", work.name],
+                capture_output=True, text=True, timeout=300)
+
+        _spans = work / "spans_active.json"
         if _spans.exists():
-            import json as _json
             _n = len((_json.load(open(_spans)) or {}).get("promos") or [])
             if _n:
                 cmd += ["--promo-json", str(_spans)]
-                stats["nohd_spans"] = _n
+                stats["exclusion_spans"] = _n
     except Exception as _exc:
-        stats["nohd_spans"] = "skipped (%s)" % type(_exc).__name__
+        stats["exclusion_spans"] = "skipped (%s)" % type(_exc).__name__
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     if register:
