@@ -5,3 +5,6 @@ __pycache__/
 *.session-journal
 data/
 work/
+
+# editing backups -- never publish these to a public repo
+*.pre-*
