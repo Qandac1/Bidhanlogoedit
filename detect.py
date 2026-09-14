@@ -659,7 +659,10 @@ def detect_ad_banners(
     dur = _duration(video)
     # Fixed-interval sampling (~every 2s) so a banner can't hide between
     # keyframes; capped at ~2200 frames so very long movies stay reasonable.
-    sample_fps = max(0.30, min(0.6, 2200.0 / max(1.0, dur)))
+    # Normalize scan DENSITY across lengths: a 2h episode now samples as
+    # densely (~every 1.7-2s) as a short trailer, so long content is no
+    # less reliable than short. Cap ~5000 frames keeps 3h+ reasonable.
+    sample_fps = max(0.5, min(0.6, 5000.0 / max(1.0, dur)))
     n = _extract_frames(video, frames_dir, sample_fps, width=960)
     files = sorted(glob.glob(os.path.join(frames_dir, "*.jpg")))
     m = len(files)
@@ -739,7 +742,7 @@ def detect_ad_banners(
         # filter keeps it.
         for gb in grid_boxes:
             if not any(_iou(gb, e[1]) > 0.2 for e in dets if e[0] == t):
-                dets.append((t, gb, True, False, False))
+                dets.append((t, gb, False, False, False))  # grid EXTENDS, never CONFIRMS alone
             if 0.2 <= gb[2] <= 0.95:
                 c = _crop_gray(gray, gb, W, H)
                 if c is not None and (exemplars.get("ch") is None
@@ -881,6 +884,13 @@ def detect_ad_banners(
             hit["rep"] = _box_from(hit["boxes"])
         else:
             bands.append(dict(e))
+
+    # TRUST: a band is a real banner ONLY if a phone number OR a full-banner
+    # template confirmed it. The channels-grid detector can false-trigger on
+    # colourful scenes (palace jewellery/decor), so a grid-ONLY band (no number,
+    # no template) is dropped. The grid still EXTENDS a confirmed banner.
+    bands = [b for b in bands
+             if b["digits"] >= 1 or any(is_t for _bx, _r, is_t in b["boxes"])]
 
     # Every detection here is already a confirmed banner: a red bar WITH white
     # text, a phone number, or a template match. min_duration/coverage (in the
