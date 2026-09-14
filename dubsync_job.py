@@ -912,8 +912,19 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
         #    22s/25s/6s). Tested across 7 approved films: 12 stage-1 candidates, ALL
         #    rejected by the text stage, 0 false positives (FM-078). Costs 6-17s against
         #    a ~2.5h render.
-        _sp.run([DLG_PY, "/opt/dubsync2/promo_detect.py", str(work), "--write"],
-                capture_output=True, text=True, timeout=900)
+        _pd = _sp.run([DLG_PY, "/opt/dubsync2/promo_detect.py", str(work), "--write"],
+                      capture_output=True, text=True, timeout=900)
+        # SURFACE an OCR refusal. promo_detect refuses rather than reporting a false clean
+        # result (FM-081) -- but this call captures stdout and discards it, so without the
+        # next four lines the refusal protects the tool's honesty and never reaches anyone.
+        # A broken evidence stage would then look identical to an advert-free film.
+        if "OCR REFUSED" in (_pd.stdout or ""):
+            stats["adverts"] = "NOT CHECKED -- OCR unavailable"
+        elif (work / "promo_spans.json").exists():
+            stats["adverts"] = len((_json.load(open(work / "promo_spans.json"))
+                                    or {}).get("promos") or [])
+        else:
+            stats["adverts"] = "not scannable (needs embeds.npz)"
 
         # 3. One active set: sorted union, overlaps kept, NEVER merged and re-judged
         #    (FM-068b -- merging averaged two criteria together and refused both).
