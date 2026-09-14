@@ -682,10 +682,15 @@ async def _premium_send(out_path: str, caption: str, duration: int,
 
 # ----------------------------------------------------------------- estimate
 def _effective_bitrate(c: dict, dur: float) -> tuple[int, str]:
+    # size_target is a CEILING, not a fixed target: only REDUCE the bitrate when
+    # the clip would exceed the target, NEVER inflate a short clip up to it (a
+    # 52s trailer must stay ~15MB, not be blown up to 1.9GB at 300Mbps).
+    base = int(c["bitrate"])
     if c["size_target_gb"] > 0 and dur > 0:
-        vk = bitrate_for_target(dur, int(c["size_target_gb"] * 1024 ** 3), c["audio_k"])
-        return vk, f"{vk}k (auto → {c['size_target_gb']:g} GB)"
-    return c["bitrate"], f"{c['bitrate']}k"
+        cap = bitrate_for_target(dur, int(c["size_target_gb"] * 1024 ** 3), c["audio_k"])
+        if cap < base:
+            return cap, f"{cap}k (capped → {c['size_target_gb']:g} GB)"
+    return base, f"{base}k"
 
 
 def _fit_bitrate(vk: int, dur: float, audio_k: int) -> tuple[int, str]:
