@@ -603,6 +603,21 @@ async def run_dubsync(
 
 
 DLG_SCRIPT = "/opt/dubsync2/dialogue_layer.py"
+
+# MOUTH LOCK. Each Somali utterance is snapped onto an HD original-dialogue
+# onset when exactly one sits within this many seconds of where the anchor map
+# put it. The HD original dialogue is the production audio of that footage, so
+# its onset is the frame the mouth opens.
+#
+# MEASURED before enabling (sync_probe.py, Welcome to the Jungle HD 30:00-35:00,
+# ground truth = HD vocal onsets): the map alone lands 7.3% of utterances within
+# 80ms of the mouth and puts 21.8% more than a second away. At +/-0.6s, 63.2% of
+# utterances have EXACTLY ONE candidate onset and 0.0% are ambiguous; median move
+# 0.30s; ordering preserved. Widening to 0.9s adds only 3.5 points of coverage
+# and introduces the first ambiguous pairings, so 0.6 is the knee, not a guess.
+#
+# Set to 0.0 to restore the pre-mouth-lock placement exactly.
+SNAP_S = 0.6
 DLG_PY = "/opt/dubsync2/.venv/bin/python"
 
 
@@ -620,6 +635,22 @@ def _work_dir_for(hd: Path, dub: Path) -> Path:
         with open(f, "rb") as fh:
             return hashlib.sha256(fh.read(100000)).hexdigest()
 
+    def orig_of(p: Path) -> Path:
+        # A _PROXY is a transcode the bot makes for fast seeking (HEVC/10-bit
+        # masters). The engine keys its work dir to the ORIGINALS: `analyze` is
+        # run with only --title and resolves raw/ itself, and dialogue_layer's
+        # find_raw() scans _hd_ORIG/_dub_ORIG exclusively. Hashing the proxy
+        # therefore points at a work dir no stage ever writes, which surfaced as
+        # "edl.json missing in <hash>" on the first HEVC master. Hash the ORIGINAL.
+        for who in ('hd', 'dub'):
+            tag = '_%s_PROXY' % who
+            if tag in p.name:
+                stem = p.name.split(tag)[0]
+                for cand in sorted(p.parent.glob('%s_%s_ORIG.*' % (stem, who))):
+                    return cand
+        return p
+
+    hd, dub = orig_of(hd), orig_of(dub)
     parts = [str(hd.stat().st_size), str(dub.stat().st_size),
              head_sha(hd), head_sha(dub)]
     h = hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
@@ -871,6 +902,9 @@ async def _render_dialogue_layer(hd: Path, dub: Path, title: str,
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     cmd = [DLG_PY, "-u", DLG_SCRIPT, "--work", str(work),
            "--full", "--chunk", "300", "--out", str(out)]
+    if SNAP_S > 0:
+        cmd += ["--snap", str(SNAP_S)]
+        stats["mouth_lock"] = "+/-%.2fs" % SNAP_S
     # Brand only when the panel actually produced a config. Passing a missing
     # path would make the engine log UNBRANDED on every render and hide a real
     # misconfiguration behind a warning nobody reads.
