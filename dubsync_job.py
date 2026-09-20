@@ -672,6 +672,25 @@ def _pick_mode(hd: Path, dub: Path) -> tuple[str, str]:
     unmeasurable pair behaves exactly as it did before this function existed.
     """
     work = _work_dir_for(hd, dub)
+
+    # The conform aligner now solves a NON-DECREASING offset curve, and it
+    # REFUSES when the two releases are not a clean cut of one film (measured:
+    # >15% of shots the picture cannot confirm, or a degenerate curve). A
+    # refusal means a conform render would be guesswork -- exactly what put
+    # repeated footage and other-scene dialogue in the Spider-Noir delivery.
+    # Dialogue-layer renders the HD timeline straight through, so it cannot
+    # replay footage at all. That is the safe answer, not a worse conform.
+    try:
+        _edl = json.loads((work / "edl.json").read_text())
+        _co = _edl.get("conform_offset")
+        if _co and not _co.get("accepted"):
+            return "dlg", (
+                "the conform aligner refused this pair (%s); dialogue-layer "
+                "renders the HD timeline straight through and cannot repeat a shot"
+                % _co.get("reason", "no reason recorded"))
+    except Exception:
+        pass                      # missing/unreadable edl -> fall through as before
+
     try:
         r = subprocess.run(
             [DLG_PY, "/opt/dubsync2/dub_cut_check.py", "--caption", str(work)],
@@ -1131,14 +1150,48 @@ def _quality_report(title: str) -> dict:
             # that no audio-envelope rescue was needed
             out['locked_pct'] = 100.0 * sum(1 for e in body
                                             if not e.get('needs_resync')) / len(body)
-        resynced = [e for e in body if e.get('needs_resync')]
-        out['resynced'] = len(resynced)
         out['shots'] = len(body)
-        deltas = [abs(e['audio_resync_delta_s']) for e in body
-                  if e.get('audio_resync_delta_s') is not None]
+        # APPLIED, not proposed. conform.apply_resync only commits a correction
+        # at NCC >= 0.50 and |shift| <= 2.0s; everything else keeps the
+        # conformed offset. Counting proposals told John the film had 66.67s of
+        # drift when nothing had moved at all.
+        applied = [e for e in body
+                   if (e.get('audio_resync_conf') or 0) >= 0.50
+                   and abs(e.get('audio_resync_delta_s') or 0) <= 2.0
+                   and e.get('needs_resync')]
+        out['resynced'] = len(applied)
+        out['unconfirmed'] = sum(1 for e in body if e.get('needs_resync'))
+        deltas = [abs(e['audio_resync_delta_s']) for e in applied]
         if deltas:
             out['max_drift'] = max(deltas)
             out['mean_drift'] = sum(deltas) / len(deltas)
+        # Does any HD footage play more than once? Read straight off the EDL
+        # that rendered, on a 0.1s grid. The offset curve makes this 0 by
+        # construction; if it is ever non-zero something upstream regressed.
+        try:
+            hs = [(e['hd_start_s'], e['hd_start_s'] + e['dub_dur_s'])
+                  for e in body if e.get('hd_start_s') is not None]
+            if hs:
+                g = 0.1
+                top = max(b for _, b in hs)
+                grid = [0] * (int(top / g) + 2)
+                for a, b in hs:
+                    for k in range(max(0, int(a / g)), max(0, int(b / g))):
+                        grid[k] += 1
+                out['replay_s'] = sum(1 for v in grid if v >= 2) * g
+                out['replay_worst'] = max(grid) if grid else 0
+                out['backward'] = sum(1 for i in range(1, len(hs))
+                                      if hs[i][0] < hs[i - 1][1] - 0.04)
+        except Exception:
+            pass
+        try:
+            _co = _json.load(open(_os.path.join(wd, 'edl.json'))).get('conform_offset')
+            if _co:
+                out['offset_ok'] = bool(_co.get('accepted'))
+                out['offset_steps'] = _co.get('steps')
+                out['offset_unconf'] = _co.get('unconfirmed_pct')
+        except Exception:
+            pass
         ip = _os.path.join(wd, 'integrity_report.json')
         if _os.path.exists(ip):
             r = _json.load(open(ip))
@@ -1186,15 +1239,29 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
             lines.append(f"🎯 lip-sync locked: **{q['locked_pct']:.1f}%** "
                          f"({q['shots'] - q.get('resynced', 0)}/{q['shots']} shots "
                          f"matched picture-to-picture)")
-        if q.get("resynced"):
-            lines.append(f"🎧 audio-resynced: {q['resynced']} shots "
-                         f"(rescued by sound when the picture was unclear)")
+        if q.get("unconfirmed"):
+            lines.append(f"🫥 picture unclear on {q['unconfirmed']} shots — held on the "
+                         f"conformed offset (never jumped); {q.get('resynced', 0)} "
+                         f"audio corrections actually applied")
+        if q.get("replay_s") is not None:
+            _r = q['replay_s']
+            lines.append(("♻️ repeated footage: **none** (0.0s, each HD frame used once)"
+                          if _r < 0.2 else
+                          f"⚠️ repeated footage: {_r:.1f}s (worst {q.get('replay_worst', 0)}x)")
+                         + (f" · backward jumps {q['backward']}"
+                            if q.get('backward') else ""))
+        if q.get("offset_ok") is not None:
+            lines.append("🧭 conform offset curve: "
+                         + (f"accepted, {q.get('offset_steps')} editorial cuts, "
+                            f"{q.get('offset_unconf')}% unconfirmed"
+                            if q['offset_ok'] else
+                            "REFUSED — rendered as dialogue-layer instead"))
         if q.get("visual_mean") is not None:
             lines.append(f"👁 picture match: mean **{q['visual_mean']:.3f}** "
                          f"/ median {q.get('visual_median', 0):.3f}")
         if q.get("max_drift") is not None:
-            lines.append(f"⏱ sync drift: avg {q.get('mean_drift', 0):.2f}s, "
-                         f"worst {q['max_drift']:.2f}s")
+            lines.append(f"⏱ applied audio correction: avg {q.get('mean_drift', 0):.2f}s, "
+                         f"worst {q['max_drift']:.2f}s (bounded at 2.00s)")
         if q.get("cut_s"):
             lines.append(f"✂️ channel material cut: {q['cut_s']:.0f}s")
         if q.get("visible_s") is not None:
