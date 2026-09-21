@@ -496,6 +496,10 @@ async def run_dubsync(
                 stats["duplication"] = f"{m.group(1)}s"
             if (m := pat_intro.search(line)):
                 stats["intro_shots"] = m.group(1)
+            _m_fs = re.search(r"film starts at dub ([0-9.]+)s", line)
+            if _m_fs:
+                _fs = float(_m_fs.group(1))
+                stats["film_start"] = "%d:%02d" % (int(_fs // 60), int(_fs % 60))
             if pat_promo.search(line):
                 stats["promo_removed"] = "yes"
             if (m := pat_expected_dur.search(line)):
@@ -1308,9 +1312,12 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
         # auto-detector found 0:37 while the real intro ended at 1:53, because
         # the dub had moved the title sequence to the front. Cutting on a weak
         # signal once deleted 403s of real film, so this asks instead.
-        lines.append("✂️ dub intro cut automatically — CHECK THE FIRST 2 MINUTES. "
-                     "If any channel intro or recap is still there, reply with the "
-                     "timestamp where the film really starts and I will re-cut.")
+        # head_scan locates the film start from the largest BACKWARD offset
+        # step, which is exactly what a fronted title sequence looks like, so
+        # this is reported to be checked rather than asked as a question.
+        if st.get("film_start"):
+            lines.append("✂️ film starts at %s — intro/bumpers cut automatically"
+                         % st["film_start"])
         if q.get("offset_ok") is not None:
             lines.append("🧭 conform offset curve: "
                          + (f"accepted, {q.get('offset_steps')} editorial cuts, "
