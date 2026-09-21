@@ -357,7 +357,11 @@ async def run_dubsync(
               # head -- censor cards, studio logos, with Hindi audio -- onto
               # every render. That is exactly the long/Hindi intro John keeps
               # reporting. --no-hd-intro restores the rule: start at the film.
-              "--no-hd-intro",
+              # The HD master's own head -- Amazon/studio logos with its OWN
+              # audio -- is kept when the dub-start is a head trim. The renderer
+              # caps it at 45s and refuses anything longer, so the old failure
+              # (3 minutes of censor cards with Hindi audio) cannot return.
+              "--hd-intro",
               "--output-name", out_name]
     # A target bitrate keeps the delivered size close to what the panel quoted.
     # CRF with -preset ultrafast does not: it pins quality and lets the bitrate
@@ -577,6 +581,46 @@ async def run_dubsync(
     if not out.exists():
         return DubResult(False, None, "render produced no file", stats)
 
+    # ---- AUDIO: the dub for talking, the HD master for music it really has --
+    # Without this the delivered film carries the dub track for 100% of its
+    # runtime and none of the HD master's fight/music audio.
+    try:
+        _pr = on_progress("🎚 Building audio (dub dialogue + HD music)", 88.0)
+        if asyncio.iscoroutine(_pr):
+            await _pr
+        _sa_out = OUT_DIR / f"{title}_v8.mp4"
+        _sa = await asyncio.create_subprocess_exec(
+            DLG_PY, "-u", SWITCH_AUDIO, "--work", str(_work_dir_for(hd, dub)),
+            "--video", str(out), "--out", str(_sa_out), "--abitrate", "320k",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        if register:
+            register(_sa)
+        _txt = (await _sa.communicate())[0].decode("utf-8", "replace")
+        await _sa.wait()
+        for _ln in _txt.splitlines():
+            if "HD passages:" in _ln or "DUB carries" in _ln or "intro:" in _ln:
+                stats.setdefault("audio_notes", []).append(_ln.strip())
+        if _sa_out.exists() and _sa_out.stat().st_size > 0:
+            out = _sa_out
+            stats["audio"] = "dub dialogue + HD master music"
+        else:
+            stats["audio"] = "dub only (switch_audio produced no file)"
+    except Exception as _aexc:
+        stats["audio"] = "dub only (%s)" % type(_aexc).__name__
+
+    # ---- GATE: jumps the dub did NOT make (skipped footage) ----------------
+    try:
+        _ca = await asyncio.create_subprocess_exec(
+            DLG_PY, CUT_AUDIT, str(_work_dir_for(hd, dub)), str(out), str(dub), "0",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        _ct = (await _ca.communicate())[0].decode("utf-8", "replace")
+        await _ca.wait()
+        for _ln in _ct.splitlines():
+            if _ln.startswith("UNJUSTIFIED CUTS"):
+                stats["cut_gate"] = _ln.strip()
+    except Exception as _cexc:
+        stats["cut_gate"] = "not run (%s)" % type(_cexc).__name__
+
     # Release gate. A failure here is not a crash — the movie exists, it just
     # could not be proven clean, and the caller should say so rather than
     # silently presenting it as finished.
@@ -602,6 +646,8 @@ async def run_dubsync(
                      stats)
 
 
+SWITCH_AUDIO = "/opt/dubsync2/switch_audio.py"
+CUT_AUDIT = "/opt/dubsync2/cut_audit.py"
 DLG_SCRIPT = "/opt/dubsync2/dialogue_layer.py"
 
 # MOUTH LOCK. Each Somali utterance is snapped onto an HD original-dialogue
@@ -1250,6 +1296,21 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
                           f"⚠️ repeated footage: {_r:.1f}s (worst {q.get('replay_worst', 0)}x)")
                          + (f" · backward jumps {q['backward']}"
                             if q.get('backward') else ""))
+        if st.get("audio"):
+            lines.append(f"🎚 audio: {st['audio']}")
+        for _n in (st.get("audio_notes") or [])[:3]:
+            lines.append(f"   · {_n}")
+        if st.get("cut_gate"):
+            _cg = st["cut_gate"]
+            lines.append(("✅ cut gate: " + _cg) if _cg.startswith("UNJUSTIFIED CUTS: 0")
+                         else ("⚠️ cut gate: " + _cg + " — jumps the dub did NOT make"))
+        # The ONE thing the engine must not decide alone. On Spider-Noir the
+        # auto-detector found 0:37 while the real intro ended at 1:53, because
+        # the dub had moved the title sequence to the front. Cutting on a weak
+        # signal once deleted 403s of real film, so this asks instead.
+        lines.append("✂️ dub intro cut automatically — CHECK THE FIRST 2 MINUTES. "
+                     "If any channel intro or recap is still there, reply with the "
+                     "timestamp where the film really starts and I will re-cut.")
         if q.get("offset_ok") is not None:
             lines.append("🧭 conform offset curve: "
                          + (f"accepted, {q.get('offset_steps')} editorial cuts, "
