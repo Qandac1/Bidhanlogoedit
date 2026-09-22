@@ -404,6 +404,9 @@ async def run_dubsync(
     # file whose real length silently drifted from what was actually cut —
     # the cheapest possible smoke test for "did this ship intact."
     pat_expected_dur = re.compile(r"Expected duration:\s*([\d.]+)s")
+    # The HD master's own ident, prepended ahead of the dub body. The cut
+    # gate compares output time against dub time, so it must know this.
+    pat_hd_intro = re.compile(r"HD intro kept:\s*[\d.]+s\s*(?:->|\u2192)\s*([\d.]+)s")
 
     def _cancelled() -> bool:
         return bool(should_cancel and should_cancel())
@@ -504,6 +507,10 @@ async def run_dubsync(
                 stats["promo_removed"] = "yes"
             if (m := pat_expected_dur.search(line)):
                 stats["expected_duration_s"] = float(m.group(1))
+            # "HD intro kept: 0.00s -> 4.56s (114 frames) with HD's ORIGINAL audio"
+            # The cut gate needs this: every output timestamp is shifted by it.
+            if (m := pat_hd_intro.search(line)):
+                stats["hd_intro_s"] = float(m.group(1))
 
             pct = (done_weight + weight * inner) / total_weight * 100.0
             if pct - last_emit >= 1.0:
@@ -615,7 +622,8 @@ async def run_dubsync(
     # ---- GATE: jumps the dub did NOT make (skipped footage) ----------------
     try:
         _ca = await asyncio.create_subprocess_exec(
-            DLG_PY, CUT_AUDIT, str(_work_dir_for(hd, dub)), str(out), str(dub), "0",
+            DLG_PY, CUT_AUDIT, str(_work_dir_for(hd, dub)), str(out), str(dub),
+            "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         _ct = (await _ca.communicate())[0].decode("utf-8", "replace")
         await _ca.wait()
