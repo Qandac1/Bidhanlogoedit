@@ -1785,6 +1785,21 @@ def _derive_name(m: Message) -> str:
     return "video.mp4"
 
 
+_DUB_WORDS = ("somali", "soomaali", "fanproj", "fanproject", "af-soomaali")
+
+
+def _somali_index(msgs: list):
+    """Index of the ONE file whose name/caption says it is the Somali dub,
+    or None when both or neither do (then order/resolution decide)."""
+    hits = []
+    for i, m in enumerate(msgs):
+        v = m.video or m.document
+        text = " ".join(filter(None, [getattr(v, "file_name", None) or "",
+                                      m.caption or "", _derive_name(m)])).lower()
+        hits.append(any(w in text for w in _DUB_WORDS))
+    return hits.index(True) if hits.count(True) == 1 else None
+
+
 def _vmeta(m: Message) -> tuple[str, int, int, float]:
     """Name/size/duration straight from Telegram — no download needed."""
     v = m.video or m.document
@@ -1841,8 +1856,14 @@ async def _dubflow_take(uid: int, m: Message) -> bool:
     # The user told us which is which, so trust that ordering rather than
     # guessing from resolution — Swap on the confirm panel is still there if
     # they sent them the wrong way round.
-    _dubsel[uid] = {"msgs": msgs, "hd_i": 0, "brand": True, "panel": None,
-                    "mode": "conform"}
+    _hd_i, _named = 0, None
+    _si = _somali_index(msgs)
+    if _si is not None:
+        _hd_i = 1 - _si
+        _named = ("the file sent first says Somali, so it is the dub"
+                  if _si == 0 else None)
+    _dubsel[uid] = {"msgs": msgs, "hd_i": _hd_i, "brand": True, "panel": None,
+                    "mode": "conform", "named": _named}
     try:
         panel = await fl["prompt"].edit(_dub_panel_text(uid),
                                         reply_markup=_dub_panel_kb(uid))
@@ -1945,6 +1966,7 @@ def _dub_panel_text(uid: int) -> str:
         "the film starts exactly where the dub's film starts — nothing the dub "
         "cut is added back._\n"
         "⚠️ Wrong way round? Tap **Swap**."
+        + (f"\n🔎 _Auto-ordered: {sel['named']}._" if sel.get("named") else "")
     )
 
 
@@ -2189,8 +2211,13 @@ async def _cb(_, cq: CallbackQuery):
         # can easily be the larger file.
         a, b = _vmeta(msgs[0]), _vmeta(msgs[1])
         hd_i = 0 if (a[1] * a[2]) >= (b[1] * b[2]) else 1
+        _named = None
+        _si = _somali_index(msgs)
+        if _si is not None and hd_i != 1 - _si:
+            hd_i = 1 - _si
+            _named = "picked by name: the file that says Somali is the dub"
         _dubsel[uid] = {"msgs": msgs, "hd_i": hd_i, "brand": True, "panel": None,
-                        "mode": "conform"}
+                        "mode": "conform", "named": _named}
         await cq.answer()
         panel = await cq.message.edit(_dub_panel_text(uid),
                                       reply_markup=_dub_panel_kb(uid))
@@ -2223,6 +2250,7 @@ async def _cb(_, cq: CallbackQuery):
             return await cq.answer()
         if act == "swap":
             sel["hd_i"] = 1 - sel["hd_i"]
+            sel["named"] = None
             await _refresh_dub_panel(uid)
             return await cq.answer("Swapped.")
         if act == "brand":
@@ -2822,6 +2850,7 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
                         status.edit(f"☁️ **Uploading to MEGA**\n`{_bar(pct)}`"), loop)
             link = await asyncio.to_thread(delivery.mega_upload, out, name, _mcb)
             await reply_to.reply(f"{cap}\n📥 **MEGA link:**\n{link}")
+            await _send_report()
             return True
         except Exception as e:
             errors.append(f"MEGA: {str(e)[:150]}")
