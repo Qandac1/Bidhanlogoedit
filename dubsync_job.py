@@ -597,6 +597,32 @@ async def run_dubsync(
                 mode = "dlg"
                 break
 
+        # --- PLACEMENT GATE: never render what the picture could not place ---
+        # The engine records whether its shot placement was confirmed by the
+        # picture. When it refuses (the HD and the dub are different edits),
+        # every later stage runs on a fallback plan of wrong clips -- which is
+        # exactly what Jigarthanda DoubleX was about to ship. Stop here.
+        if key == "analyze" and mode != "dlg":
+            try:
+                _co = json.loads((_work_dir_for(hd, dub) / "edl.json")
+                                 .read_text()).get("conform_offset") or {}
+            except Exception:
+                _co = {}
+            if _co.get("accepted") is False:
+                _pct = _co.get("unconfirmed_pct")
+                stats["placement"] = str(_co.get("reason", ""))
+                return DubResult(
+                    False, None,
+                    "⛔ NOT rendered — the HD and the dub are not the same "
+                    "edit of this film.\n"
+                    + (f"{_pct:.0f}% of the dub's shots could not be found in "
+                       "this HD's picture, " if isinstance(_pct, (int, float))
+                       else "The dub's shots could not be found in this HD, ")
+                    + "so any render would put wrong clips on screen.\n"
+                    "Send an HD of the SAME version the dub was made from "
+                    "(e.g. the WEB-DL / OTT release, not a PreDVD/cam copy), "
+                    "then run /dub again.", stats)
+
     if mode == "dlg":
         return await _render_dialogue_layer(hd, dub, title, on_progress,
                                             register, _cancelled, stats,
