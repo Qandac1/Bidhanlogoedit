@@ -1267,8 +1267,20 @@ def _quality_report(title: str) -> dict:
         # that rendered, on a 0.1s grid. The offset curve makes this 0 by
         # construction; if it is ever non-zero something upstream regressed.
         try:
-            hs = [(e['hd_start_s'], e['hd_start_s'] + e['dub_dur_s'])
-                  for e in body if e.get('hd_start_s') is not None]
+            # what the renderer actually played: provenance carries each shot's
+            # real span (two-way placement plays a shot up to where the next
+            # begins); the EDL only knows start + duration
+            hs = []
+            try:
+                _pv = _json.load(open(_os.path.join(wd, 'provenance.json')))
+                _pv.sort(key=lambda r: r['final_start'])
+                hs = [(r['hd_start'], r['hd_end']) for r in _pv
+                      if r.get('hd_start') is not None and r.get('hd_end') is not None]
+            except Exception:
+                hs = []
+            if not hs:
+                hs = [(e['hd_start_s'], e['hd_start_s'] + e['dub_dur_s'])
+                      for e in body if e.get('hd_start_s') is not None]
             if hs:
                 g = 0.1
                 top = max(b for _, b in hs)
