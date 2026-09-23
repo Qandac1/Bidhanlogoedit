@@ -338,6 +338,20 @@ async def run_dubsync(
     mode: str = "conform",
 ) -> DubResult:
     """Run the pipeline, reporting (stage label, overall 0..100) as it goes."""
+    # Never render ABOVE the master's own size. Ghost's 1280x542 master went
+    # out at 1920x1080 -- upscaled and padded, no extra detail, 2.00 GB against
+    # 1.58 GB native. A bigger master is still scaled down to the setting.
+    try:
+        import subprocess as _sp
+        _wh = _sp.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                       "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                       str(hd)], capture_output=True, text=True).stdout.strip().split(",")
+        _mw, _mh = int(_wh[0]), int(_wh[1])
+        if _mw > 0 and _mh > 0 and (width <= 0 or height <= 0
+                                     or width > _mw or height > _mh):
+            width, height = _mw - (_mw % 2), _mh - (_mh % 2)
+    except Exception:
+        pass
     out_name = f"{title}_final.mp4"
     brand_path = None
     if brand_cfg:

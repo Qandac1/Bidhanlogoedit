@@ -2749,6 +2749,21 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
         return False
     sz = os.path.getsize(out)
     cap, name = entry["cap"], entry["name"]
+    # Telegram rejects media captions over 1024 characters -- AFTER uploading
+    # the whole file. Send a short caption and the full report as a message.
+    _report_after = None
+    if len(cap) > 1000:
+        _report_after = cap
+        cap = cap[:900].rsplit("\n", 1)[0] + "\n\n📋 full report in the next message"
+
+    async def _send_report():
+        if not _report_after:
+            return
+        for _i in range(0, len(_report_after), 3900):
+            try:
+                await reply_to.reply(_report_after[_i:_i + 3900])
+            except Exception as _re:
+                log.warning("report message failed: %s", _re)
     ow, oh, odur = int(entry.get("w", 0)), int(entry.get("h", 0)), entry.get("dur", 0)
     errors: list[str] = []
 
@@ -2766,6 +2781,7 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
             await reply_to.reply_video(out, duration=int(odur), width=ow, height=oh,
                                        supports_streaming=True, caption=cap,
                                        file_name=name, progress=_ulp)
+            await _send_report()
             return True
         except Exception as e:
             errors.append(f"Telegram: {str(e)[:150]}")
@@ -2788,6 +2804,7 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
                                         target_uid=uid, progress=_pp)
             if where != "your chat":
                 await reply_to.reply(f"{cap}\n📥 Sent to {where}.")
+            await _send_report()
             return True
         except Exception as e:
             errors.append(f"premium: {str(e)[:150]}")
