@@ -646,8 +646,37 @@ async def run_dubsync(
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         if register:
             register(_sa)
-        _txt = (await _sa.communicate())[0].decode("utf-8", "replace")
+        # Read switch_audio's per-piece lines as they come, so the panel moves
+        # during the longest silent step of a feature film.
+        import re as _re_a
+        import time as _time_a
+        _pat_scan = _re_a.compile(r"(dub|hd): [0-9.]+-([0-9.]+)s scanned")
+        _lines, _pieces, _last = [], 0, 0.0
+        try:
+            _total = float(_audio_len_s(out)) if "_audio_len_s" in globals() else 0.0
+        except Exception:
+            _total = 0.0
+        _expect = max(2, int(2 * (_total // 300.0 + 1))) if _total > 0 else 0
+        while True:
+            _raw = await _sa.stdout.readline()
+            if not _raw:
+                break
+            _ln = _raw.decode("utf-8", "replace")
+            _lines.append(_ln)
+            if _pat_scan.search(_ln):
+                _pieces += 1
+                if _expect and _time_a.time() - _last >= 20:
+                    _last = _time_a.time()
+                    try:
+                        _pr2 = on_progress("🎚 Building audio -- listening %d/%d"
+                                           % (min(_pieces, _expect), _expect),
+                                           88.0 + 7.0 * min(1.0, _pieces / _expect))
+                        if asyncio.iscoroutine(_pr2):
+                            await _pr2
+                    except Exception:
+                        pass
         await _sa.wait()
+        _txt = "".join(_lines)
         for _ln in _txt.splitlines():
             if "HD passages:" in _ln or "DUB carries" in _ln or "intro:" in _ln:
                 stats.setdefault("audio_notes", []).append(_ln.strip())
@@ -696,6 +725,17 @@ async def run_dubsync(
     return DubResult(True, out,
                      "released" if released else "delivered for review — integrity gate FAILED (NOT final)",
                      stats)
+
+
+def _audio_len_s(video) -> float:
+    """Duration of the rendered video, for the audio step's progress count."""
+    import subprocess as _sp
+    r = _sp.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(video)], capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
 
 
 SWITCH_AUDIO = "/opt/dubsync2/switch_audio.py"
