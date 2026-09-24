@@ -1785,7 +1785,8 @@ def _derive_name(m: Message) -> str:
     return "video.mp4"
 
 
-_DUB_WORDS = ("somali", "soomaali", "fanproj", "fanproject", "af-soomaali")
+_DUB_WORDS = ("somali", "soomaali", "fanproj", "fanproject", "af-soomaali",
+              "astaan")   # Astaan dubs (Agent Zero, 2026-09-24)
 
 
 def _somali_index(msgs: list):
