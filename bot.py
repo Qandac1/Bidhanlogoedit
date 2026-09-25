@@ -627,12 +627,64 @@ def _parse_ids(m: Message) -> list[int]:
 
 
 # ----------------------------------------------------------------- premium
+# A session FILE can outlive the login: Telegram revokes it (401
+# AUTH_KEY_UNREGISTERED) while the file stays. Trusting the file alone sized
+# renders for 4 GB and then every delivery failed (Jigarthanda 3.0 GB,
+# Calaawudiin 2.9 GB, 2026-09-25). A session Telegram has REJECTED is kept here
+# and treated as "no premium" until /loginpremium writes a different one.
+_PREMIUM_DEAD: str | None = None
+_PREMIUM_OK = {"sess": None, "at": 0.0}
+_PREMIUM_AUTH_ERRORS = ("AUTH_KEY_UNREGISTERED", "AUTH_KEY_INVALID", "SESSION_REVOKED",
+                        "SESSION_EXPIRED", "USER_DEACTIVATED", "AUTH_KEY_DUPLICATED")
+
+
 def _premium_session() -> str | None:
     try:
         s = open(PREMIUM_SESSION_FILE).read().strip()
-        return s or None
     except OSError:
         return None
+    if not s or s == _PREMIUM_DEAD:
+        return None
+    return s
+
+
+def _premium_mark_if_dead(sess: str | None, exc: BaseException) -> bool:
+    """Remember `sess` as dead ONLY on Telegram's own auth rejections."""
+    global _PREMIUM_DEAD
+    if sess and any(k in str(exc) for k in _PREMIUM_AUTH_ERRORS):
+        _PREMIUM_DEAD = sess
+        log.warning("premium login rejected by Telegram -- treating as not logged in "
+                    "until /loginpremium: %s", str(exc)[:120])
+        return True
+    return False
+
+
+async def _premium_probe(max_age: float = 600.0) -> bool | None:
+    """Does the saved premium login still work? None = no login saved,
+    False = Telegram rejected it, True = works (or could not be checked --
+    a network problem is not a verdict, so the current belief stands)."""
+    sess = _premium_session()
+    if not sess:
+        return False if _PREMIUM_DEAD else None
+    if _PREMIUM_OK["sess"] == sess and time.time() - _PREMIUM_OK["at"] < max_age:
+        return True
+    pu = Client("premium_probe", api_id=settings.api_id, api_hash=settings.api_hash,
+                session_string=sess, in_memory=True, no_updates=True)
+    try:
+        await asyncio.wait_for(pu.start(), 40)
+        await asyncio.wait_for(pu.get_me(), 20)
+        _PREMIUM_OK.update(sess=sess, at=time.time())
+        return True
+    except Exception as e:
+        if _premium_mark_if_dead(sess, e):
+            return False
+        log.info("premium probe inconclusive (kept as usable): %s", str(e)[:120])
+        return True
+    finally:
+        try:
+            await pu.stop()
+        except Exception:
+            pass
 
 
 async def _premium_send(out_path: str, caption: str, duration: int,
@@ -656,7 +708,11 @@ async def _premium_send(out_path: str, caption: str, duration: int,
     sess = _premium_session()
     pu = Client("premium_up", api_id=settings.api_id, api_hash=settings.api_hash,
                 session_string=sess, in_memory=True, no_updates=True)
-    await pu.start()
+    try:
+        await pu.start()
+    except Exception as e:
+        _premium_mark_if_dead(sess, e)
+        raise
     try:
         me_bot = await app.get_me()
         dest = me_bot.username or "me"
@@ -2539,6 +2595,16 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         # matches the estimate instead of ballooning under CRF + ultrafast.
         # Output length tracks the dub, which is what the panel measured.
         _dur = dub_job.get("duration") or 0.0
+        # Size for the delivery that will REALLY work: a revoked premium login
+        # must not make the render aim for 4 GB (it then cannot be sent).
+        try:
+            if await _premium_probe() is False:
+                await app.send_message(
+                    uid, "⚠️ Your premium login has expired, so this film is being "
+                         "sized to fit Telegram's 2 GB limit. Send /loginpremium to "
+                         "get up to 4 GB again.")
+        except Exception:
+            log.exception("premium probe before render failed")
         _vk, _ = _effective_bitrate(c, _dur)
         _vk, _ = _fit_bitrate(_vk, _dur, c["audio_k"])
         res = await dubsync_job.run_dubsync(
@@ -3279,6 +3345,12 @@ async def _main() -> None:
         await _notify_pending_on_startup()
     except Exception:
         log.exception("startup resume-notify failed")
+    try:
+        _pp = await _premium_probe(max_age=0)
+        log.info("premium login at startup: %s",
+                 {None: "none saved", True: "works", False: "EXPIRED"}[_pp])
+    except Exception:
+        log.exception("startup premium probe failed")
     await idle()
     await app.stop()
 

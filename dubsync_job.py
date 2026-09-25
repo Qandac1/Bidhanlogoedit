@@ -708,6 +708,7 @@ async def run_dubsync(
     gate = await asyncio.create_subprocess_exec(
         *base, "integrity", "--title", title, "--file", str(out),
         "--scan-step", "5", "--max-accidental", str(max_accidental),
+        "--intro-s", "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     gate_out = (await gate.communicate())[0].decode("utf-8", "replace")
     await gate.wait()
@@ -1377,7 +1378,7 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
         extra = " + closing promo" if st.get("promo_removed") else ""
         lines.append(f"✂️ dub intro removed ({st['intro_shots']} shots){extra}")
     if st.get("duplication"):
-        lines.append(f"🧹 residual repeats: {st['duplication']}")
+        lines.append(f"🧹 dedupe pass (on the edit plan): {st['duplication']} left")
     lines.append("🛡 integrity gate: " +
                  ("✅ **passed**" if _passed
                   else f"❌ **FAILED — release held** ({_nblock} blocker" + ("s" if _nblock != 1 else "") + ")"))
@@ -1386,18 +1387,21 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
         lines.append("")
         lines.append("📊 **Quality report**" + ("" if _passed else " _(measured on a NOT-final cut)_"))
         if q.get("locked_pct") is not None:
-            lines.append(f"🎯 lip-sync locked: **{q['locked_pct']:.1f}%** "
-                         f"({q['shots'] - q.get('resynced', 0)}/{q['shots']} shots "
-                         f"matched picture-to-picture)")
+            lines.append(f"🎯 picture matched: **{q['locked_pct']:.1f}%** of shots "
+                         f"({q['shots'] - q.get('resynced', 0)}/{q['shots']} placed "
+                         f"frame-to-frame on the HD)")
         if q.get("unconfirmed"):
             lines.append(f"🫥 picture unclear on {q['unconfirmed']} shots — held on the "
                          f"conformed offset (never jumped); {q.get('resynced', 0)} "
                          f"audio corrections actually applied")
         if q.get("replay_s") is not None:
             _r = q['replay_s']
-            lines.append(("♻️ repeated footage: **none** (0.0s, each HD frame used once)"
-                          if _r < 0.2 else
-                          f"⚠️ repeated footage: {_r:.1f}s (worst {q.get('replay_worst', 0)}x)")
+            _v = q.get('visible_s') or 0.0
+            lines.append(("♻️ repeated footage: **none** (each HD frame used once)"
+                          if _r < 0.05 and _v < 0.05 else
+                          f"⚠️ repeated footage: {_r:.1f}s (worst {q.get('replay_worst', 0)}x)"
+                          if _r >= 0.05 else
+                          f"⚠️ repeated footage: {_v:.1f}s visible -- see 🔎 spots below")
                          + (f" · backward jumps {q['backward']}"
                             if q.get('backward') else ""))
         if st.get("audio"):
