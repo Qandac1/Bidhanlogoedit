@@ -723,6 +723,32 @@ async def run_dubsync(
             # John so he can jump straight to each suspected repeat.
             stats.setdefault("dup_regions", []).append(s)
 
+    # ---- END CREDITS: every film ends on its own credits (John 2026-09-25) --
+    # Pirate dubs swap the film's credits for a channel promo; the promo is cut
+    # above, so the HD master's own credits (not a scene, never foreign speech)
+    # are appended to the FINISHED file -- after every check. Fail-open.
+    try:
+        _cr = await asyncio.create_subprocess_exec(
+            DLG_PY, APPEND_CREDITS, "--work", str(_work_dir_for(hd, dub)),
+            "--video", str(out), "--out", str(out),
+            "--keep-under", str(TG_FIT_BYTES),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        _crt = (await _cr.communicate())[0].decode("utf-8", "replace")
+        await _cr.wait()
+        for _ln in _crt.splitlines():
+            if _ln.startswith("CREDITS:"):
+                _m = re.search(r"appended ([0-9.]+)s", _ln)
+                if _m:
+                    stats["credits_s"] = float(_m.group(1))
+                    if stats.get("expected_duration_s"):
+                        stats["expected_duration_s"] = (
+                            float(stats["expected_duration_s"]) + float(_m.group(1)))
+                stats["credits"] = _ln[len("CREDITS:"):].strip()
+            elif _ln.startswith(("SKIP:", "CREDITS FAILED:")):
+                stats["credits"] = _ln.strip()
+    except Exception as _crx:
+        stats["credits"] = "not run (%s)" % type(_crx).__name__
+
     return DubResult(True, out,
                      "released" if released else "delivered for review — integrity gate FAILED (NOT final)",
                      stats)
@@ -741,6 +767,8 @@ def _audio_len_s(video) -> float:
 
 SWITCH_AUDIO = "/opt/dubsync2/switch_audio.py"
 CUT_AUDIT = "/opt/dubsync2/cut_audit.py"
+APPEND_CREDITS = "/opt/dubsync2/append_credits.py"
+TG_FIT_BYTES = int(1.95 * 1024 ** 3)      # same cap as bot.TG_LIMIT
 DLG_SCRIPT = "/opt/dubsync2/dialogue_layer.py"
 
 # MOUTH LOCK. Each Somali utterance is snapped onto an HD original-dialogue
@@ -1422,6 +1450,12 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
         if st.get("film_start"):
             lines.append("✂️ film starts at %s — intro/bumpers cut automatically"
                          % st["film_start"])
+        if st.get("credits_s"):
+            _cs = int(round(st["credits_s"]))
+            lines.append("🎬 end credits kept: %d:%02d of the film's own credits, "
+                         "with their music" % (_cs // 60, _cs % 60))
+        elif str(st.get("credits", "")).startswith("CREDITS FAILED"):
+            lines.append("⚠️ end credits not added — %s" % st["credits"][16:90])
         if q.get("offset_ok") is not None:
             lines.append("🧭 conform offset curve: "
                          + (f"accepted, {q.get('offset_steps')} editorial cuts, "
