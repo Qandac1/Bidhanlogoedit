@@ -159,13 +159,14 @@ async def _run(uid: int, st: dict) -> None:
         if rc != 0 or not result:
             raise RuntimeError("prepare failed: " + " › ".join(tail[-3:])[:400])
         job = json.load(open(jobdir / "job.json"))
-        qs = [c["i"] for c in job["cues"] if not c.get("auto") and c.get("suggest")]
+        qs = [c["i"] for c in job["cues"] if not c.get("auto")]
         auto = sum(1 for c in job["cues"] if c.get("auto"))
         _ask[uid] = {"jobdir": jobdir, "job": job, "qs": qs, "pos": 0, "choices": {}, "status": status}
         await say("✅ **%d** of %d lines placed automatically (proven: picture + meaning).\n"
                   "🎧 **%d** lines need you: listen, then tap the right Somali line.\n"
                   "First the trailer's own line plays, then Somali **1** (1 beep), **2** (2 beeps), "
-                  "**3** (3 beeps)." % (auto, len(job["cues"]), len(qs)))
+                  "**3** (3 beeps). Every pick helps the next lines: the bot re-fills the "
+                  "conversation around it." % (auto, len(job["cues"]), len(qs)))
         await _question(uid)
     except Exception as exc:
         log.exception("trailer job failed")
@@ -176,22 +177,46 @@ def _mmss(t: float) -> str:
     return "%d:%02d" % (t // 60, t % 60)
 
 
+async def _ask_engine(jobdir: Path, i: int) -> list:
+    """Candidates for line i built fresh with every pick so far (engine `ask`): the
+    conversation-order fill first, then the prepared suggestions; clips rendered."""
+    proc = await asyncio.create_subprocess_exec(*ENGINE, "ask", "--job", str(jobdir), "--cue", str(i),
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    raw, _ = await proc.communicate()
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if line.startswith("ASK "):
+            return json.load(open(jobdir / ("cands_%02d.json" % i)))
+    raise RuntimeError("could not build the question for line %d" % (i + 1))
+
+
 async def _question(uid: int) -> None:
     st = _ask.get(uid)
     if not st:
         return
+    while st["pos"] < len(st["qs"]):
+        i = st["qs"][st["pos"]]
+        cands = await _ask_engine(st["jobdir"], i)
+        if cands:
+            break
+        st["choices"][str(i)] = 0                  # nothing to offer: stays original
+        st["pos"] += 1
     if st["pos"] >= len(st["qs"]):
         return await _finish(uid)
-    i = st["qs"][st["pos"]]
+    st["cands"] = cands
     c = st["job"]["cues"][i]
-    sug = c["suggest"]
-    row = [IKB(str(k), "trl:pick:%d:%d" % (st["pos"], k)) for k in range(1, min(3, len(sug)) + 1)]
-    row2 = ([IKB("▶ 4–%d" % min(6, len(sug)), "trl:more:%d" % st["pos"])] if len(sug) > 3 else []) + \
-        [IKB("✖ None", "trl:pick:%d:0" % st["pos"])]
+    n1 = min(3, len(cands))
+    row = [IKB(str(k), "trl:pick:%d:%d" % (st["pos"], k)) for k in range(1, n1 + 1)]
+    row2 = ([IKB("▶ 4–%d" % min(6, len(cands)), "trl:more:%d" % st["pos"])] if len(cands) > 3 else [])
+    row2 += [IKB("✖ None", "trl:pick:%d:0" % st["pos"])]
     kb = IKM([row, row2, [IKB("🎬 Finish now (rest stays original)", "trl:finish")]])
-    cap = ("🎧 **Line %d/%d** · %s–%s\n“%s”"
-           % (st["pos"] + 1, len(st["qs"]), _mmss(c["t0"]), _mmss(c["t1"]), c["text"]))
-    await _deps["app"].send_voice(uid, str(st["jobdir"] / ("ask_%02d_p1.ogg" % i)), caption=cap, reply_markup=kb)
+    opts = []
+    for k, cd in enumerate(cands[:3], 1):
+        tag = " (conversation order)" if cd["how"].startswith(("conversation", "inside")) else ""
+        opts.append("**%d**%s — %s" % (k, tag, (cd.get("so") or "")[:48]))
+    cap = ("🎧 **Line %d/%d** · %s–%s\n“%s”\n\n%s"
+           % (st["pos"] + 1, len(st["qs"]), _mmss(c["t0"]), _mmss(c["t1"]), c["text"], "\n".join(opts)))
+    await _deps["app"].send_voice(uid, str(st["jobdir"] / ("ask_%02d_p1.ogg" % i)), caption=cap[:1000],
+                                  reply_markup=kb)
 
 
 async def _cb(_, cq):
@@ -231,16 +256,25 @@ async def _cb(_, cq):
             await cq.answer("Already answered")
             return
         i = st["qs"][pos]
+        cands = st.get("cands") or []
         if parts[1] == "more":
-            sug = st["job"]["cues"][i]["suggest"]
-            row = [IKB(str(k), "trl:pick:%d:%d" % (pos, k)) for k in range(4, len(sug) + 1)]
+            row = [IKB(str(k), "trl:pick:%d:%d" % (pos, k)) for k in range(4, len(cands) + 1)]
+            opts = ["**%d** — %s" % (k, (cands[k - 1].get("so") or "")[:48]) for k in range(4, len(cands) + 1)]
             await cq.answer()
             await _deps["app"].send_voice(uid, str(st["jobdir"] / ("ask_%02d_p2.ogg" % i)),
-                                          caption="🎧 Line %d — Somali 4, 5, 6" % (pos + 1),
+                                          caption=("🎧 Line %d — Somali 4, 5, 6\n" % (pos + 1)) + "\n".join(opts),
                                           reply_markup=IKM([row, [IKB("✖ None", "trl:pick:%d:0" % pos)]]))
             return
         k = int(parts[3])
-        st["choices"][str(i)] = k
+        if 1 <= k <= len(cands):
+            cd = cands[k - 1]
+            if cd.get("covered_by") is not None:
+                st["choices"][str(i)] = "cov:%d" % cd["covered_by"]
+            else:
+                st["choices"][str(i)] = [cd["film_t"], cd["film_t1"]]
+        else:
+            k = 0
+            st["choices"][str(i)] = 0
         json.dump(st["choices"], open(st["jobdir"] / "choices.json", "w"))
         st["pos"] += 1
         await cq.answer("✅ %s" % ("Somali %d" % k if k else "none — stays original"))
