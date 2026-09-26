@@ -115,11 +115,11 @@ REPAIR_PASSES = 4        # convergence measured at 4 on a 2h27m feature
 REPAIR_TARGET_S = 5.0    # clean enough — stop
 REPAIR_MIN_GAIN_S = 1.0  # a pass that buys less than this is not worth another
 
-# `dubsync2 analyze` prints one "▶ <step>" line per sub-step (16 in cli.py) and
+# `dubsync2 analyze` prints one "▶ <step>" line per sub-step (17 in cli.py) and
 # its [n/m] ticks all come from the first steps, so the bar used to reach ~97 %
 # of the stage early and then sit frozen for 20+ min while the later steps ran —
 # on 2026-09-26 that read as a stuck bot and a working job was cancelled.
-ANALYZE_STEPS = 16
+ANALYZE_STEPS = 17
 _STEP_MARK = "▶"
 
 
