@@ -16,6 +16,7 @@ TRAILER = "/opt/dubsync2/trailers_in/jigarthanda.mp4"
 SRT = "/opt/dubsync2/trailers_in/jigarthanda.en.srt"
 MOVIE_SRT = "/opt/dubsync2/trailers_in/jigarthanda_movie.en.srt"
 FILM_MSG = 58680
+MODE = __import__("sys").argv[1] if len(__import__("sys").argv) > 1 else "manual"   # auto = the one-tap button
 TRUTH = {5: 2389.3, 6: 2394.7, 8: 2229.1, 9: 2240.05, 13: 3030.0, 14: 3030.8, 15: 3035.0,
          23: 908.9, 25: 914.4, 28: 3657.2, 34: 7519.7, 40: 9261.0}      # verified by reading
 COV = {10: 9, 11: 9, 29: 28}                  # lines spoken inside another line's Somali sentence
@@ -78,6 +79,11 @@ async def main():
                         print("RESULT FAIL: job stopped")
                         return
                 bs = buttons(m)
+                if "trl:auto" in bs and not STATS.get("mode_clicked"):
+                    STATS["mode_clicked"] = True
+                    print("[%4.0fs] choosing mode: %s" % (time.time() - t0, MODE), flush=True)
+                    await click(app, m.id, "trl:auto" if MODE == "auto" else "trl:manual")
+                    continue
                 picks = [b for b in bs if b.startswith("trl:pick:")]
                 if not picks or not m.voice:
                     continue
