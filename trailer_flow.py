@@ -56,11 +56,16 @@ async def _cmd(_, m):
         await m.reply("⛔ This bot is private.")
         return m.stop_propagation()
     _ask.pop(uid, None)
-    _intake[uid] = {"step": "trailer", "trailer": None, "film": None, "subs": None}
+    _intake[uid] = {"step": "trailer", "trailer": None, "film": None, "subs": None, "movie_subs": None}
     _intake[uid]["prompt"] = await m.reply(
-        "🎬 **Somali trailer**\n\n**1/3** Send the official **trailer** (video).",
+        "🎬 **Somali trailer**\n\n**1/4** Send the official **trailer** (video).",
         reply_markup=_kb_cancel())
     m.stop_propagation()
+
+
+MOVIE_SUBS_ASK = ("🎬 **Somali trailer**\n\n✅ Trailer received\n✅ Somali film received\n%s\n"
+                  "**4/4** Send the **MOVIE's English subtitles** (.srt — the whole film, from subdl.com "
+                  "or opensubtitles.org). With them most lines are placed automatically. Or tap **Skip**.")
 
 
 def _is_video(m) -> bool:
@@ -84,22 +89,27 @@ async def _take(_, m):
     if st["step"] == "trailer" and _is_video(m):
         st["trailer"], st["step"] = m, "film"
         await st["prompt"].edit("🎬 **Somali trailer**\n\n✅ Trailer received\n"
-                                "**2/3** Now send the **Somali film** (the full dubbed movie).",
+                                "**2/4** Now send the **Somali film** (the full dubbed movie).",
                                 reply_markup=_kb_cancel())
     elif st["step"] == "film" and _is_video(m):
         st["film"], st["step"] = m, "subs"
         await st["prompt"].edit(
             "🎬 **Somali trailer**\n\n✅ Trailer received\n✅ Somali film received\n"
-            "**3/3** Send the trailer's **English subtitles** (.srt) if you have them "
+            "**3/4** Send the **trailer's** English subtitles (.srt) if you have them "
             "(exact timing and words), or tap **No subtitles**.",
             reply_markup=_kb_cancel([IKB("⏭ No subtitles", "trl:nosubs")]))
     elif st["step"] == "subs" and _is_subs(m):
-        st["subs"] = m
+        st["subs"], st["step"] = m, "movie_subs"
+        await st["prompt"].edit(MOVIE_SUBS_ASK % "✅ Trailer subtitles received",
+                                reply_markup=_kb_cancel([IKB("⏭ Skip", "trl:nomovie")]))
+    elif st["step"] == "movie_subs" and _is_subs(m):
+        st["movie_subs"] = m
         _start(uid)
     else:
         await m.reply("Waiting for the %s. /cancel or ❌ to stop." %
                       {"trailer": "trailer video", "film": "Somali film video",
-                       "subs": "subtitles (.srt) or the No subtitles button"}[st["step"]])
+                       "subs": "trailer subtitles (.srt) or the No subtitles button",
+                       "movie_subs": "movie subtitles (.srt) or the Skip button"}[st["step"]])
     m.stop_propagation()
 
 
@@ -132,6 +142,10 @@ async def _run(uid: int, st: dict) -> None:
             sp = str(jobdir / "subs.srt")
             await st["subs"].download(file_name=sp)
             cmd += ["--subs", sp]
+        if st.get("movie_subs"):
+            mp = str(jobdir / "movie.srt")
+            await st["movie_subs"].download(file_name=mp)
+            cmd += ["--movie-subs", mp]
         await say("🔎 Preparing…")
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
                                                     stderr=asyncio.subprocess.STDOUT)
@@ -229,8 +243,9 @@ async def _question(uid: int) -> None:
     kb = IKM([row, row2, [IKB("🎬 Finish now (rest stays original)", "trl:finish")]])
     opts = []
     for k, cd in enumerate(cands[:3], 1):
-        tag = " (conversation order)" if cd["how"].startswith(("conversation", "inside")) else ""
-        opts.append("**%d**%s — %s" % (k, tag, (cd.get("so") or "")[:48]))
+        tag = (" (conversation order)" if cd["how"].startswith(("conversation", "inside"))
+               else " (movie subtitles)" if cd["how"].startswith("movie") else "")
+        opts.append("**%d**%s — %s" % (k, tag, (cd.get("so") or "")[:48] or "(Somali voice, no clear words)"))
     head = ("🔁 **Round 2** — new answer from your picks · " if round2 else "") + \
         "question %d/%d" % (st["pos"] + 1, len(st["qs"]))
     cap = ("🎧 **Line %d of %d** · %s–%s · %s\n“%s”\n\n%s"
@@ -258,7 +273,20 @@ async def _cb(_, cq):
             return
         if data == "trl:nosubs":
             if uid in _intake and _intake[uid]["step"] == "subs":
-                await cq.answer("No subtitles — the bot will listen to the trailer itself")
+                await cq.answer("No trailer subtitles — the bot will listen to the trailer itself")
+                _intake[uid]["step"] = "movie_subs"
+                try:
+                    await _intake[uid]["prompt"].edit(
+                        MOVIE_SUBS_ASK % "⏭ No trailer subtitles",
+                        reply_markup=_kb_cancel([IKB("⏭ Skip", "trl:nomovie")]))
+                except Exception:
+                    pass
+            else:
+                await cq.answer()
+            return
+        if data == "trl:nomovie":
+            if uid in _intake and _intake[uid]["step"] == "movie_subs":
+                await cq.answer("No movie subtitles")
                 _start(uid)
             else:
                 await cq.answer()
