@@ -3,7 +3,11 @@ services:
     build: .
     container_name: bidhaan-logoedit
     restart: unless-stopped
-    cpus: 6            # hard CPU cap so one render can never thrash the box
+    # FULL PRIORITY (John 2026-09-27): all 8 cores + the top CPU weight, so under load the
+    # scheduler gives this bot the machine (measured: 91% vs 8 busy SSH jobs). The host side:
+    # user.slice CPUWeight=10 (systemctl set-property) -- jobs launched over SSH yield.
+    cpus: 8
+    cpu_shares: 262144 # cgroup v2 cpu.weight 10000 (max); everything else has 100
     env_file: .env
     environment:
       - TZ=UTC
