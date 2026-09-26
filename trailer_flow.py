@@ -176,12 +176,20 @@ async def _run(uid: int, st: dict) -> None:
         qs = [c["i"] for c in job["cues"] if not c.get("auto")]
         auto = sum(1 for c in job["cues"] if c.get("auto"))
         _ask[uid] = {"jobdir": jobdir, "job": job, "qs": qs, "pos": 0, "choices": {}, "status": status}
-        await say("✅ **%d** of %d lines placed automatically (proven: picture + meaning).\n"
-                  "🎧 **%d** lines need you: listen, then tap the right Somali line.\n"
-                  "First the trailer's own line plays, then Somali **1** (1 beep), **2** (2 beeps), "
-                  "**3** (3 beeps). Every pick helps the next lines: the bot re-fills the "
-                  "conversation around it." % (auto, len(job["cues"]), len(qs)))
-        await _question(uid)
+        if not qs:
+            return await _finish(uid)
+        try:
+            await status.edit(
+                "🎬 **Somali trailer**\n\n✅ **%d** of %d lines placed automatically (proven).\n"
+                "**%d** lines left. Choose:\n"
+                "⚡ **Best answers** — the bot takes its best Somali line for each (how Test 4 was made)\n"
+                "🎧 **Check each line** — listen and tap: the trailer's line plays, then Somali "
+                "**1** (1 beep), **2** (2 beeps), **3** (3 beeps)" % (auto, len(job["cues"]), len(qs)),
+                reply_markup=IKM([[IKB("⚡ Best answers for all lines", "trl:auto")],
+                                  [IKB("🎧 Let me check each line", "trl:manual")],
+                                  [IKB("❌ Cancel", "trl:cancel")]]))
+        except Exception:
+            await _question(uid)
     except Exception as exc:
         log.exception("trailer job failed")
         await say("❌ %s" % exc)
@@ -191,16 +199,54 @@ def _mmss(t: float) -> str:
     return "%d:%02d" % (t // 60, t % 60)
 
 
-async def _ask_engine(jobdir: Path, i: int) -> list:
-    """Candidates for line i built fresh with every pick so far (engine `ask`): the
-    conversation-order fill first, then the prepared suggestions; clips rendered."""
-    proc = await asyncio.create_subprocess_exec(*ENGINE, "ask", "--job", str(jobdir), "--cue", str(i),
+async def _ask_engine(jobdir: Path, i: int, clips: bool = True) -> list:
+    """Candidates for line i built fresh with every pick so far (engine `ask`), strongest
+    evidence first; listening clips rendered unless clips=False (the automatic mode)."""
+    extra = [] if clips else ["--no-clips"]
+    proc = await asyncio.create_subprocess_exec(*ENGINE, "ask", "--job", str(jobdir), "--cue", str(i), *extra,
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     raw, _ = await proc.communicate()
     for line in raw.decode("utf-8", "replace").splitlines():
         if line.startswith("ASK "):
             return json.load(open(jobdir / ("cands_%02d.json" % i)))
     raise RuntimeError("could not build the question for line %d" % (i + 1))
+
+
+def _choice(cd: dict):
+    """A candidate as it is stored in choices.json."""
+    if cd.get("covered_by") is not None:
+        return "cov:%d" % cd["covered_by"]
+    return [cd["film_t"], cd["film_t1"]]
+
+
+async def _auto(uid: int) -> None:
+    """⚡ Best answers: #1 for every line, in trailer order (each re-built with the answers
+    so far), then a second pass where later answers changed a line's #1 -- exactly how
+    Test 4 was made (John: "this is how any feature trailer should be")."""
+    st = _ask.get(uid)
+    if not st:
+        return
+    jd, status = st["jobdir"], st["status"]
+    first = {}
+    try:
+        await status.edit("🎬 **Somali trailer**\n\n⚡ Choosing the best Somali line for %d lines…" % len(st["qs"]))
+    except Exception:
+        pass
+    for i in st["qs"]:
+        cands = await _ask_engine(jd, i, clips=False)
+        if cands:
+            first[i] = cands[0]
+            st["choices"][str(i)] = _choice(cands[0])
+            json.dump(st["choices"], open(jd / "choices.json", "w"))
+    for i in list(first):
+        st["choices"].pop(str(i), None)
+        json.dump(st["choices"], open(jd / "choices.json", "w"))
+        cands = await _ask_engine(jd, i, clips=False)
+        best = cands[0] if cands and not _same(cands[0], first[i]) else first[i]
+        st["choices"][str(i)] = _choice(best)
+        json.dump(st["choices"], open(jd / "choices.json", "w"))
+    st["pos"] = len(st["qs"])
+    await _finish(uid)
 
 
 def _same(a: dict, b: dict) -> bool:
@@ -294,6 +340,17 @@ async def _cb(_, cq):
         st = _ask.get(uid)
         if not st:
             await cq.answer("This trailer job has ended.", show_alert=True)
+            return
+        if data in ("trl:auto", "trl:manual"):
+            if st.get("mode"):
+                await cq.answer("Already started")
+                return
+            st["mode"] = data[4:]
+            await cq.answer("⚡ Best answers" if data == "trl:auto" else "🎧 Here comes line 1")
+            if data == "trl:auto":
+                asyncio.get_event_loop().create_task(_auto(uid))
+            else:
+                await _question(uid)
             return
         if data == "trl:finish":
             await cq.answer("Building now")
