@@ -189,19 +189,37 @@ async def _ask_engine(jobdir: Path, i: int) -> list:
     raise RuntimeError("could not build the question for line %d" % (i + 1))
 
 
+def _same(a: dict, b: dict) -> bool:
+    if a.get("covered_by") is not None or b.get("covered_by") is not None:
+        return a.get("covered_by") == b.get("covered_by")
+    return abs(a["film_t"] - b["film_t"]) < 0.5
+
+
 async def _question(uid: int) -> None:
     st = _ask.get(uid)
     if not st:
         return
-    while st["pos"] < len(st["qs"]):
-        i = st["qs"][st["pos"]]
-        cands = await _ask_engine(st["jobdir"], i)
-        if cands:
+    round2 = st.get("round", 1) == 2
+    while True:
+        while st["pos"] < len(st["qs"]):
+            i = st["qs"][st["pos"]]
+            cands = await _ask_engine(st["jobdir"], i)
+            first1 = st.setdefault("first1", {}).get(i)
+            if cands and not (round2 and first1 is not None and _same(cands[0], first1)):
+                break
+            st["choices"].setdefault(str(i), 0)      # nothing (new) to offer: stays original
+            st["pos"] += 1
+        if st["pos"] < len(st["qs"]):
             break
-        st["choices"][str(i)] = 0                  # nothing to offer: stays original
-        st["pos"] += 1
-    if st["pos"] >= len(st["qs"]):
-        return await _finish(uid)
+        # ROUND 2: lines answered None are asked again only if the picks made after them
+        # gave them a new first answer (lines just BEFORE a later pick, e.g. 14-15 before 16)
+        left = [i for i in st["qs"] if st["choices"].get(str(i)) == 0] if not round2 else []
+        if not left:
+            return await _finish(uid)
+        st.update(round=2, qs=left, pos=0)
+        round2 = True
+    if not round2:
+        st["first1"][i] = cands[0]
     st["cands"] = cands
     c = st["job"]["cues"][i]
     n1 = min(3, len(cands))
@@ -213,8 +231,11 @@ async def _question(uid: int) -> None:
     for k, cd in enumerate(cands[:3], 1):
         tag = " (conversation order)" if cd["how"].startswith(("conversation", "inside")) else ""
         opts.append("**%d**%s — %s" % (k, tag, (cd.get("so") or "")[:48]))
-    cap = ("🎧 **Line %d/%d** · %s–%s\n“%s”\n\n%s"
-           % (st["pos"] + 1, len(st["qs"]), _mmss(c["t0"]), _mmss(c["t1"]), c["text"], "\n".join(opts)))
+    head = ("🔁 **Round 2** — new answer from your picks · " if round2 else "") + \
+        "question %d/%d" % (st["pos"] + 1, len(st["qs"]))
+    cap = ("🎧 **Line %d of %d** · %s–%s · %s\n“%s”\n\n%s"
+           % (i + 1, len(st["job"]["cues"]), _mmss(c["t0"]), _mmss(c["t1"]), head, c["text"],
+              "\n".join(opts)))
     await _deps["app"].send_voice(uid, str(st["jobdir"] / ("ask_%02d_p1.ogg" % i)), caption=cap[:1000],
                                   reply_markup=kb)
 
@@ -262,7 +283,8 @@ async def _cb(_, cq):
             opts = ["**%d** — %s" % (k, (cands[k - 1].get("so") or "")[:48]) for k in range(4, len(cands) + 1)]
             await cq.answer()
             await _deps["app"].send_voice(uid, str(st["jobdir"] / ("ask_%02d_p2.ogg" % i)),
-                                          caption=("🎧 Line %d — Somali 4, 5, 6\n" % (pos + 1)) + "\n".join(opts),
+                                          caption=("🎧 Line %d of %d — Somali 4, 5, 6\n" %
+                                                   (i + 1, len(st["job"]["cues"]))) + "\n".join(opts),
                                           reply_markup=IKM([row, [IKB("✖ None", "trl:pick:%d:0" % pos)]]))
             return
         k = int(parts[3])
@@ -304,9 +326,11 @@ async def _finish(uid: int) -> None:
     if proc.returncode != 0 or not m or not os.path.exists(out):
         tail = " › ".join(txt.strip().splitlines()[-3:])[:400]
         return await msg.edit("❌ Building failed: " + tail)
+    cues = st["job"]["cues"]
+    auto = sum(1 for c in cues if c.get("auto"))
     picked = sum(1 for v in st["choices"].values() if v)
     await msg.edit("✅ Done — sending…")
     await app.send_video(uid, out, supports_streaming=True, caption=(
-        "🎬 **Somali trailer**\nSomali on **%s of %s** lines (%d automatic + %d you picked).\n"
-        "Picture identical to the official trailer." %
-        (m.group(1), m.group(2), int(m.group(1)) - picked, picked)))
+        "🎬 **Somali trailer**\nSomali on **%d of the trailer's %d lines** — %d proven automatically, "
+        "%d you picked; %d stay original.\nPicture identical to the official trailer." %
+        (auto + picked, len(cues), auto, picked, len(cues) - auto - picked)))
