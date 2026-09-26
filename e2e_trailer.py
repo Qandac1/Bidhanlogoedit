@@ -14,9 +14,12 @@ from pyrogram import Client
 BOT = "BidhaanLogoEdit_bot"
 TRAILER = "/opt/dubsync2/trailers_in/jigarthanda.mp4"
 SRT = "/opt/dubsync2/trailers_in/jigarthanda.en.srt"
+MOVIE_SRT = "/opt/dubsync2/trailers_in/jigarthanda_movie.en.srt"
 FILM_MSG = 58680
 TRUTH = {5: 2389.3, 6: 2394.7, 8: 2229.1, 9: 2240.05, 13: 3030.0, 14: 3030.8, 15: 3035.0,
-         23: 908.9, 25: 914.4, 34: 7519.7, 40: 9261.0}
+         23: 908.9, 25: 914.4, 28: 3657.2, 34: 7519.7, 40: 9261.0}      # verified by reading
+COV = {10: 9, 11: 9, 29: 28}                  # lines spoken inside another line's Somali sentence
+STATS = {"asked": 0, "picked": 0, "first": 0, "first_by_order": 0}
 
 
 def env(k):
@@ -51,8 +54,10 @@ async def main():
         await app.forward_messages(BOT, BOT, FILM_MSG)
         await asyncio.sleep(6)
         await app.send_document(BOT, SRT)
+        await asyncio.sleep(6)
+        await app.send_document(BOT, MOVIE_SRT)
         print("[%4.0fs] inputs sent" % (time.time() - t0), flush=True)
-        done_pos, used_more, last_status = set(), False, ""
+        done_pos, used_more, last_status, last_round = set(), False, "", 1
         jobdir = None
         while time.time() - t0 < 3600:
             await asyncio.sleep(10)
@@ -62,6 +67,7 @@ async def main():
                 txt = m.text or m.caption or ""
                 if m.video:
                     print("[%4.0fs] VIDEO delivered: %s" % (time.time() - t0, txt.replace("\n", " / ")), flush=True)
+                    print("STATS", STATS)
                     print("RESULT PASS: Somali trailer delivered through /trailer")
                     return
                 if txt.startswith("🎬 **Somali trailer**") or txt.startswith("🎬 Somali trailer"):
@@ -76,19 +82,28 @@ async def main():
                 if not picks or not m.voice:
                     continue
                 pos = int(picks[0].split(":")[2])
-                if pos in done_pos or "➡️" in txt:
+                rnd = 2 if "Round 2" in txt else 1
+                if "Somali 4, 5, 6" in txt:
+                    rnd = last_round
+                if (rnd, pos) in done_pos or "➡️" in txt:
                     continue
+                import re as _re
+                mline = _re.search(r"Line (\d+) of", txt)
                 if jobdir is None:
-                    jobdir = sorted(glob.glob("/opt/dubsync2/trailers_out/jobs/*/job.json"), key=os.path.getmtime)[-1]
-                job = json.load(open(jobdir))
-                qs = [c["i"] for c in job["cues"] if not c.get("auto") and c.get("suggest")]
+                    jobdir = os.path.dirname(sorted(glob.glob("/opt/dubsync2/trailers_out/jobs/*/job.json"),
+                                                    key=os.path.getmtime)[-1])
+                job = json.load(open(os.path.join(jobdir, "job.json")))
+                i = int(mline.group(1)) - 1
+                cands = json.load(open(os.path.join(jobdir, "cands_%02d.json" % i)))
                 is_page2 = "Somali 4, 5, 6" in txt
-                i = qs[pos]
-                sug = job["cues"][i]["suggest"]
                 k = 0
-                if i in TRUTH:
-                    k = next((n for n, s in enumerate(sug, 1)
-                              if s["film_t"] - 2.0 <= TRUTH[i] <= s["film_t1"] + 0.5), 0)
+                for n, cd in enumerate(cands, 1):
+                    if i in COV and cd.get("covered_by") == COV[i]:
+                        k = n
+                        break
+                    if i in TRUTH and cd.get("covered_by") is None and                             cd["film_t"] - 2.0 <= TRUTH[i] <= cd["film_t1"] + 0.5:
+                        k = n
+                        break
                 if not used_more and not is_page2 and k == 0 and any(b.startswith("trl:more:") for b in bs):
                     used_more = True
                     print("[%4.0fs] Q%d line %d: pressing 4-6" % (time.time() - t0, pos + 1, i + 1), flush=True)
@@ -99,9 +114,17 @@ async def main():
                 if not is_page2 and k > 3:
                     await click(app, m.id, "trl:more:%d" % pos)
                     continue
-                done_pos.add(pos)
-                print("[%4.0fs] Q%d line %d %-38s -> %s" % (time.time() - t0, pos + 1, i + 1,
-                                                          job["cues"][i]["text"][:38], k or "None"), flush=True)
+                done_pos.add((rnd, pos))
+                last_round = rnd
+                STATS["asked"] += 1
+                STATS["round2"] = STATS.get("round2", 0) + (rnd == 2)
+                if k:
+                    STATS["picked"] += 1
+                    STATS["first"] += k == 1
+                    STATS["first_by_order"] += k == 1 and cands[0]["how"].startswith(("conversation", "inside"))
+                first = cands[0]["how"][:28] if cands else "-"
+                print("[%4.0fs] R%d Q%d line %d %-34s -> %-4s | #1 = %s" % (time.time() - t0, rnd, pos + 1, i + 1,
+                      job["cues"][i]["text"][:34], k or "None", first), flush=True)
                 await click(app, m.id, "trl:pick:%d:%d" % (pos, k))
         print("RESULT TIMEOUT")
 
