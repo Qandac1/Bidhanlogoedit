@@ -415,7 +415,8 @@ async def _finish(uid: int) -> None:
     auto = sum(1 for c in cues if c.get("auto"))
     picked = sum(1 for v in st["choices"].values() if v)
     await msg.edit("✅ Done — sending…")
+    how = "best answers" if st.get("mode") == "auto" else "you picked"
     await app.send_video(uid, out, supports_streaming=True, caption=(
         "🎬 **Somali trailer**\nSomali on **%d of the trailer's %d lines** — %d proven automatically, "
-        "%d you picked; %d stay original.\nPicture identical to the official trailer." %
-        (auto + picked, len(cues), auto, picked, len(cues) - auto - picked)))
+        "%d %s; %d stay original.\nPicture identical to the official trailer." %
+        (auto + picked, len(cues), auto, picked, how, len(cues) - auto - picked)))
