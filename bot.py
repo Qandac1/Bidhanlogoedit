@@ -1879,13 +1879,22 @@ DUB_ASK_DUB = (
 )
 
 
+DUB_NEXT_HD = (
+    "➕ **Next movie?**\n\n"
+    "Send its **HD master** now (then its Somali dub) — it joins the queue and runs "
+    "after the ones before it, one film at a time.\n\n"
+    "_Or tap ✅ Done. /queue shows the list._"
+)
+
+
 def _dubflow_kb() -> IKM:
     return IKM([[IKB("❌ Cancel", "dubflow:cancel")]])
 
 
-async def _dubflow_start(uid: int, m: Message) -> None:
+async def _dubflow_start(uid: int, m: Message, text: str = DUB_ASK_HD,
+                         kb: IKM | None = None) -> None:
     _dubflow[uid] = {"step": "hd", "hd": None, "dub": None}
-    _dubflow[uid]["prompt"] = await m.reply(DUB_ASK_HD, reply_markup=_dubflow_kb())
+    _dubflow[uid]["prompt"] = await m.reply(text, reply_markup=kb or _dubflow_kb())
 
 
 async def _dubflow_take(uid: int, m: Message) -> bool:
@@ -2298,6 +2307,13 @@ async def _cb(_, cq: CallbackQuery):
         await cq.message.edit("❌ Dub-sync cancelled.")
         return await cq.answer()
 
+    if data == "dubflow:done":
+        _dubflow.pop(uid, None)
+        n = sum(1 for e in (_dq._q if _dq else []) if e["uid"] == uid and e["state"] in ("waiting", "running"))
+        await cq.message.edit("✅ Done adding — **%d** movie%s in your dub-sync queue. /queue shows it."
+                              % (n, "" if n == 1 else "s"))
+        return await cq.answer()
+
     if data.startswith("dub:"):
         act = data[4:]
         sel = _dubsel.get(uid)
@@ -2343,6 +2359,21 @@ async def _cb(_, cq: CallbackQuery):
             brand = sel.get("brand", True)
             dub_mode = sel.get("mode", "auto")
             _dubsel.pop(uid, None)
+            if _dq is not None:
+                # the QUEUE: one film at a time, the next the moment one ends
+                title = _vmeta(msgs[hd_i])[0]
+                place = await _dq.enqueue(uid, msgs, hd_i, brand, dub_mode, title)
+                await cq.answer("Starting…" if place == 1 else "Queued #%d" % place)
+                try:
+                    await cq.message.edit(
+                        ("🎬 **Dub-sync starting…** `%s`" % title[:40]) if place == 1 else
+                        ("📋 **Queued #%d** — `%s`\nIt starts by itself after the %d before it. "
+                         "/queue shows the list." % (place, title[:40], place - 1)))
+                except Exception:
+                    pass
+                await _dubflow_start(uid, cq.message, DUB_NEXT_HD,
+                                     IKM([[IKB("✅ Done", "dubflow:done"), IKB("📋 Queue", "dq:show")]]))
+                return
             await cq.answer("Starting…")
             try:
                 await cq.message.edit("🎬 **Dub-sync starting…**")
@@ -3412,6 +3443,11 @@ async def _main() -> None:
         await _notify_pending_on_startup()
     except Exception:
         log.exception("startup resume-notify failed")
+    if _dq is not None:
+        try:
+            await _dq.resume()
+        except Exception:
+            log.exception("dub queue resume failed")
     try:
         _pp = await _premium_probe(max_age=0)
         log.info("premium login at startup: %s",
@@ -3433,6 +3469,23 @@ try:
         lambda: any(a.get("phase") in ("Dub-sync", "Render", "Trim") for a in _active.values()))
 except Exception:
     log.exception("/trailer not available")
+
+
+# Dub-sync QUEUE (dub_queue.py): ✅ Start adds the movie to ONE global queue and the
+# films run one at a time, the next the moment one ends; /queue shows it. If the module
+# cannot load, Start runs the film directly, exactly as before.
+_dq = None
+try:
+    import sys as _sys
+    import dub_queue as _dq_mod
+    _dq_mod.register(
+        app, _allowed, _run_dubsync,
+        lambda: (any(a.get("phase") == "Dub-sync" for a in _active.values())
+                 or bool(getattr(_sys.modules.get("trailer_flow"), "_procs", None))),
+        _cancel_everything, _dubflow_start)
+    _dq = _dq_mod
+except Exception:
+    log.exception("dub queue not available")
 
 
 if __name__ == "__main__":
