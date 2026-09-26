@@ -2276,9 +2276,12 @@ async def _cb(_, cq: CallbackQuery):
         _dubsel[uid] = {"msgs": msgs, "hd_i": hd_i, "brand": True, "panel": None,
                         "mode": "conform", "named": _named}
         await cq.answer()
-        panel = await cq.message.edit(_dub_panel_text(uid),
+        # NOT named `panel`: assigning that name anywhere in _cb makes it local
+        # for the whole handler, and "cover:toggle" below then crashed calling
+        # panel(uid, job) with UnboundLocalError.
+        _pmsg = await cq.message.edit(_dub_panel_text(uid),
                                       reply_markup=_dub_panel_kb(uid))
-        _dubsel[uid]["panel"] = panel if hasattr(panel, "edit") else cq.message
+        _dubsel[uid]["panel"] = _pmsg if hasattr(_pmsg, "edit") else cq.message
         return
 
     if data == "dubflow:begin":

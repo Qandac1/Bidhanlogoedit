@@ -61,6 +61,28 @@ REPAIR_PASSES = 4        # convergence measured at 4 on a 2h27m feature
 REPAIR_TARGET_S = 5.0    # clean enough — stop
 REPAIR_MIN_GAIN_S = 1.0  # a pass that buys less than this is not worth another
 
+# `dubsync2 analyze` prints one "▶ <step>" line per sub-step (16 in cli.py) and
+# its [n/m] ticks all come from the first steps, so the bar used to reach ~97 %
+# of the stage early and then sit frozen for 20+ min while the later steps ran —
+# on 2026-09-26 that read as a stuck bot and a working job was cancelled.
+ANALYZE_STEPS = 16
+_STEP_MARK = "▶"
+
+
+def _analyze_tick(stripped: str, frac: float | None, st: dict,
+                  label: str) -> tuple[float, str]:
+    """(stage fraction, panel label) after one line of `analyze` output.
+    Each "▶" line starts the next step (named in the panel); [n/m] ticks move
+    the bar within the current step. Callers keep the result monotonic."""
+    if stripped.startswith(_STEP_MARK):
+        st["n"] = st.get("n", 0) + 1
+        st["f"] = 0.0
+        st["shown"] = f"{label} · {stripped[1:].strip()[:48]}"
+    elif frac is not None:
+        st["f"] = frac
+    done = max(st.get("n", 0) - 1, 0) + st.get("f", 0.0)
+    return min(0.99, done / ANALYZE_STEPS), st.get("shown", label)
+
 
 
 @dataclass
@@ -477,6 +499,8 @@ async def run_dubsync(
             await res
         inner = 0.0
         last_emit = 0.0
+        shown = last_shown = label     # analyze appends its current step
+        _sub: dict = {}
         tail: list[str] = []
         stalled = False
         while True:
@@ -503,8 +527,13 @@ async def run_dubsync(
             m = pat_frac.search(line)
             if m:
                 cur, tot = int(m.group(1)), int(m.group(2))
-                if tot:
+                if tot and key != "analyze":
                     inner = min(1.0, cur / tot)
+            if key == "analyze":
+                _frac = (min(1.0, int(m.group(1)) / int(m.group(2)))
+                         if m and int(m.group(2)) else None)
+                _a, shown = _analyze_tick(stripped, _frac, _sub, label)
+                inner = max(inner, _a)
             if (m := pat_pass.search(line)):
                 stats["verified"] = f"{m.group(1)}/{m.group(2)}"
             if (m := pat_total.search(line)):
@@ -527,9 +556,10 @@ async def run_dubsync(
                 stats["hd_intro_s"] = float(m.group(1))
 
             pct = (done_weight + weight * inner) / total_weight * 100.0
-            if pct - last_emit >= 1.0:
+            if pct - last_emit >= 1.0 or shown != last_shown:
                 last_emit = pct
-                res = on_progress(label, pct)
+                last_shown = shown
+                res = on_progress(shown, pct)
                 if asyncio.iscoroutine(res):
                     await res
         if stalled:
