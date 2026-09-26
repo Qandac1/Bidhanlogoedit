@@ -2511,6 +2511,48 @@ def _brand_payload(uid: int) -> dict:
     }
 
 
+# Same-film check (engine's pair_check.py): keyframe pictures of both files; in
+# how many of the dub's 10 parts do its pictures move in step with the HD.
+# Calibrated 2026-09-26 on 9 real + 8 wrong pairs (Pushpa 1 HD + Pushpa 2 dub,
+# two episodes of one series, Agent 2023 vs Agent Zero): real 8-10 parts, wrong
+# 0-2, 0 mistakes. Only a clear "different" stops a job; anything else (too
+# little evidence, a crash, a timeout) lets it run exactly as before.
+PAIR_CHECK = ["/opt/dubsync2/.venv/bin/python", "/opt/dubsync2/pair_check.py", "--voice"]
+PAIR_CHECK_TIMEOUT_S = 300
+PAIR_DIFFERENT_MAX_PARTS = 3   # wrong pairs 0-2
+PAIR_SAME_MIN_PARTS = 6        # real pairs 8-10
+PAIR_MIN_STEPS = 40            # fewer steps (trailers, short clips) = not enough evidence
+
+
+async def _same_film_check(hd: Path, dub: Path) -> dict:
+    """{'verdict': 'same'|'different'|'unknown', 'swap': bool, ...pair_check fields}.
+    Never raises; any failure = no verdict and no swap."""
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *PAIR_CHECK, "--hd", str(hd), "--dub", str(dub),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=PAIR_CHECK_TIMEOUT_S)
+        r = json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
+    except Exception as exc:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return {"verdict": "unknown", "swap": False, "error": f"{type(exc).__name__}: {exc}"}
+    r["swap"] = r.get("swap") is True
+    if "parts" not in r or r.get("chain_steps", 0) < PAIR_MIN_STEPS:
+        r["verdict"] = "unknown"
+    elif r["parts"] <= PAIR_DIFFERENT_MAX_PARTS:
+        r["verdict"] = "different"
+    elif r["parts"] >= PAIR_SAME_MIN_PARTS:
+        r["verdict"] = "same"
+    else:
+        r["verdict"] = "unknown"
+    return r
+
+
 async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                        brand: bool = True, mode: str = "conform") -> None:
     """Conform an HD master to a Somali dub, branded in the same single pass."""
@@ -2533,6 +2575,21 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         # The user confirmed (and could correct) the pairing on the panel, so
         # honour that rather than re-guessing from the downloaded files.
         hd_job, dub_job = jobs[hd_i], jobs[1 - hd_i]
+        # Which file speaks Somali, and are they the same film? About a minute
+        # (keyframes + four short listens) before anything expensive. A clear
+        # swap is corrected here, before title / size / render settings use it.
+        await prog.set("engine", 0, label="🔎 Checking the two files", force=True)
+        pair = await _same_film_check(Path(hd_job["src"]), Path(dub_job["src"]))
+        log.info("pair check: %s", pair)
+        if pair.get("swap"):
+            hd_job, dub_job = dub_job, hd_job
+            try:
+                await status.reply(
+                    "🔄 The file marked as **HD** speaks Somali and the other one "
+                    "does not — they were the wrong way round, so I swapped them "
+                    "(HD ⇄ dub) and carried on.")
+            except Exception:
+                pass
         hd_src, dub_src = Path(hd_job["src"]), Path(dub_job["src"])
         title = dubsync_job._slug(hd_job["name"])
         # Settings first: the proxy is capped at the render height, so there is
@@ -2562,6 +2619,13 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
             preflight_problems.append(
                 f"runtime mismatch — HD {hd_dur / 60:.0f}min vs dub "
                 f"{dub_dur / 60:.0f}min (these may not be the same film)")
+        if pair.get("verdict") == "different":
+            # ~1 min instead of 40 (Pushpa 1 HD + Pushpa 2 dub ran 40 min to fail)
+            preflight_problems.append(
+                "the pictures do not match — the dub's pictures line up with "
+                f"the HD in only {pair['parts']} of 10 parts of the film (a real "
+                "pair lines up in 8–10). These are DIFFERENT films, or a "
+                "different part / episode (e.g. Pushpa 1 HD with a Pushpa 2 dub)")
         if preflight_problems:
             return await status.edit(
                 "⚠️ **Pre-flight check failed** — stopping before the "

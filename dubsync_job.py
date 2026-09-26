@@ -42,6 +42,60 @@ OUT_DIR = Path("/opt/dubsync2/out")
 # existed; nothing should ever again be allowed to do that unnoticed.
 STALL_TIMEOUT_S = 1800
 
+# Silence alone is not "hung". Pushpa 2 (3h42m 1080p dub) spent 28 silent min
+# building its detection copy and was killed at 06:15 on 2026-09-26 while
+# working flat out. After a silent window the engine's whole process tree is
+# asked how much CPU it used: a busy engine keeps its slot, an idle one (truly
+# stuck) is killed as before. A hard ceiling still ends endless silence.
+BUSY_CPU_S = 60.0          # CPU-seconds per silent window that prove it is working
+STALL_HARD_S = 4 * 3600    # never wait longer than this without a single line
+
+
+def _tree_cpu_s(pid: int) -> float:
+    """CPU seconds used so far by pid and every live descendant (plus children
+    they already reaped). 0.0 if /proc cannot be read."""
+    try:
+        tick = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError, AttributeError):
+        tick = 100
+    parent, cpu = {}, {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return 0.0
+    for d in names:
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/stat") as f:
+                st = f.read()
+        except OSError:
+            continue
+        rest = st[st.rfind(")") + 2:].split()     # fields after "(comm)"
+        try:
+            parent[int(d)] = int(rest[1])
+            cpu[int(d)] = sum(int(x) for x in rest[11:15]) / tick   # utime stime cutime cstime
+        except (IndexError, ValueError):
+            continue
+    total, todo, seen = 0.0, [pid], set()
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        total += cpu.get(p, 0.0)
+        todo += [c for c, pp in parent.items() if pp == p]
+    return total
+
+
+def _still_working(pid: int, mark: list, silent_s: float) -> bool:
+    """After a silent window: True if the process tree burned >= BUSY_CPU_S of CPU
+    since the last check and the silence has not reached STALL_HARD_S.
+    mark = [cpu seconds at the previous check] (updated in place)."""
+    now = _tree_cpu_s(pid)
+    used, mark[0] = now - mark[0], now
+    return used >= BUSY_CPU_S and silent_s < STALL_HARD_S
+
 # Stage weights measured on real runs (2h09 episode, 8 cores). They only need
 # to be roughly right — their job is to keep the bar honest, not exact.
 STAGES: list[tuple[str, str, float]] = [
@@ -503,13 +557,19 @@ async def run_dubsync(
         _sub: dict = {}
         tail: list[str] = []
         stalled = False
+        _cpu_mark = [_tree_cpu_s(proc.pid)]
+        _silent = 0.0
         while True:
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(),
                                              timeout=STALL_TIMEOUT_S)
             except asyncio.TimeoutError:
+                _silent += STALL_TIMEOUT_S
+                if _still_working(proc.pid, _cpu_mark, _silent):
+                    continue       # quiet but busy (e.g. a 3h42m detection copy)
                 stalled = True
                 break
+            _silent = 0.0
             if not raw:
                 break
             if _cancelled():
@@ -572,8 +632,9 @@ async def run_dubsync(
                 register(None)
             return DubResult(
                 False, None,
-                f"{label} produced no output for {STALL_TIMEOUT_S // 60} min "
-                "— killed as hung", stats)
+                f"{label} produced no output for {int(_silent // 60)} min"
+                + (" and stopped using the CPU" if _silent < STALL_HARD_S else "")
+                + " — killed as hung", stats)
         rc = await proc.wait()
         if register:
             register(None)
