@@ -1,0 +1,278 @@
+"""/trailer -- Somali trailer: official trailer + Somali film -> the same trailer in Somali.
+
+Separate from /dub: its own command, its own intake state, its own buttons (all
+callback data starts with "trl:"). Handlers sit in group -2 and only CLAIM what is
+theirs (a file while this user is in the /trailer intake, a "trl:" button); every
+other message and button falls through to bot.py's handlers exactly as before.
+
+Engine: /opt/dubsync2/trailer_dub.py
+  prepare -> lines placed only when PROVEN (picture + meaning, meaning, pull-in),
+             listening clips for the rest
+  (John taps the right Somali line for each question; every tap is saved)
+  finish  -> the Somali trailer (picture untouched)
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+import time
+from pathlib import Path
+
+from pyrogram import filters
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
+from pyrogram.types import InlineKeyboardButton as IKB
+from pyrogram.types import InlineKeyboardMarkup as IKM
+
+log = logging.getLogger("trailer")
+ENGINE = ["/opt/dubsync2/.venv/bin/python", "/opt/dubsync2/trailer_dub.py"]
+JOBS = Path("/opt/dubsync2/trailers_out/jobs")
+HARD_CAP_S = 4 * 3600          # a prepare that runs longer than this is stopped
+
+_deps: dict = {}
+_intake: dict[int, dict] = {}   # uid -> {"step", "trailer", "film", "prompt"}
+_ask: dict[int, dict] = {}      # uid -> {"jobdir", "job", "qs", "pos", "choices", "status"}
+
+
+def register(app, allowed, build_job, busy) -> None:
+    """Called once from bot.py. allowed(uid)->bool; build_job(uid, msg, status)->{"src"...};
+    busy()->True while another (dub / branding) job runs."""
+    _deps.update(app=app, allowed=allowed, build_job=build_job, busy=busy)
+    app.add_handler(MessageHandler(_cmd, filters.command("trailer") & filters.private), group=-2)
+    app.add_handler(MessageHandler(_take, (filters.video | filters.document) & filters.private), group=-2)
+    app.add_handler(CallbackQueryHandler(_cb, filters.regex(r"^trl:")), group=-2)
+
+
+def _kb_cancel(extra=None) -> IKM:
+    rows = [extra] if extra else []
+    return IKM(rows + [[IKB("❌ Cancel", "trl:cancel")]])
+
+
+async def _cmd(_, m):
+    uid = m.from_user.id
+    if not _deps["allowed"](uid):
+        await m.reply("⛔ This bot is private.")
+        return m.stop_propagation()
+    _ask.pop(uid, None)
+    _intake[uid] = {"step": "trailer", "trailer": None, "film": None, "subs": None}
+    _intake[uid]["prompt"] = await m.reply(
+        "🎬 **Somali trailer**\n\n**1/3** Send the official **trailer** (video).",
+        reply_markup=_kb_cancel())
+    m.stop_propagation()
+
+
+def _is_video(m) -> bool:
+    if m.video:
+        return True
+    d = m.document
+    return bool(d and ((d.mime_type or "").startswith("video") or
+                       re.search(r"\.(mp4|mkv|mov|avi|webm|ts)$", d.file_name or "", re.I)))
+
+
+def _is_subs(m) -> bool:
+    d = m.document
+    return bool(d and re.search(r"\.(srt|vtt)$", d.file_name or "", re.I))
+
+
+async def _take(_, m):
+    uid = m.from_user.id
+    st = _intake.get(uid)
+    if not st:
+        return                                   # not ours: bot.py handles it as before
+    if st["step"] == "trailer" and _is_video(m):
+        st["trailer"], st["step"] = m, "film"
+        await st["prompt"].edit("🎬 **Somali trailer**\n\n✅ Trailer received\n"
+                                "**2/3** Now send the **Somali film** (the full dubbed movie).",
+                                reply_markup=_kb_cancel())
+    elif st["step"] == "film" and _is_video(m):
+        st["film"], st["step"] = m, "subs"
+        await st["prompt"].edit(
+            "🎬 **Somali trailer**\n\n✅ Trailer received\n✅ Somali film received\n"
+            "**3/3** Send the trailer's **English subtitles** (.srt) if you have them "
+            "(exact timing and words), or tap **No subtitles**.",
+            reply_markup=_kb_cancel([IKB("⏭ No subtitles", "trl:nosubs")]))
+    elif st["step"] == "subs" and _is_subs(m):
+        st["subs"] = m
+        _start(uid)
+    else:
+        await m.reply("Waiting for the %s. /cancel or ❌ to stop." %
+                      {"trailer": "trailer video", "film": "Somali film video",
+                       "subs": "subtitles (.srt) or the No subtitles button"}[st["step"]])
+    m.stop_propagation()
+
+
+def _start(uid: int) -> None:
+    st = _intake.pop(uid)
+    asyncio.get_event_loop().create_task(_run(uid, st))
+
+
+async def _run(uid: int, st: dict) -> None:
+    status = st["prompt"]
+    jobdir = JOBS / ("%d_%d" % (uid, int(time.time())))
+    jobdir.mkdir(parents=True, exist_ok=True)
+
+    async def say(txt):
+        try:
+            await status.edit("🎬 **Somali trailer**\n\n" + txt, reply_markup=_kb_cancel())
+        except Exception:
+            pass
+    try:
+        if _deps["busy"]():
+            await say("⏳ Waiting for the film that is running now to finish — your films go first.")
+            while _deps["busy"]():
+                await asyncio.sleep(30)
+        await say("⬇️ Downloading the trailer…")
+        tj = await _deps["build_job"](uid, st["trailer"], status)
+        await say("⬇️ Downloading the Somali film…")
+        fj = await _deps["build_job"](uid, st["film"], status)
+        cmd = [*ENGINE, "prepare", "--trailer", tj["src"], "--film", fj["src"], "--job", str(jobdir)]
+        if st.get("subs"):
+            sp = str(jobdir / "subs.srt")
+            await st["subs"].download(file_name=sp)
+            cmd += ["--subs", sp]
+        await say("🔎 Preparing…")
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT)
+        t0, tail, result = time.time(), [], None
+        while True:
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=60)
+            except asyncio.TimeoutError:
+                if time.time() - t0 > HARD_CAP_S:
+                    proc.kill()
+                    raise RuntimeError("preparing took longer than 4 hours — stopped")
+                continue
+            if not raw:
+                break
+            line = raw.decode("utf-8", "replace").strip()
+            if line:
+                tail = (tail + [line])[-6:]
+            if line.startswith("STEP "):
+                await say("🔎 " + line[5:] + "\n⏱ %d min" % ((time.time() - t0) // 60))
+            elif line.startswith(("PREPARED", "REFUSED")):
+                result = line
+        rc = await proc.wait()
+        if result and result.startswith("REFUSED"):
+            return await say("⛔ " + result[8:])
+        if rc != 0 or not result:
+            raise RuntimeError("prepare failed: " + " › ".join(tail[-3:])[:400])
+        job = json.load(open(jobdir / "job.json"))
+        qs = [c["i"] for c in job["cues"] if not c.get("auto") and c.get("suggest")]
+        auto = sum(1 for c in job["cues"] if c.get("auto"))
+        _ask[uid] = {"jobdir": jobdir, "job": job, "qs": qs, "pos": 0, "choices": {}, "status": status}
+        await say("✅ **%d** of %d lines placed automatically (proven: picture + meaning).\n"
+                  "🎧 **%d** lines need you: listen, then tap the right Somali line.\n"
+                  "First the trailer's own line plays, then Somali **1** (1 beep), **2** (2 beeps), "
+                  "**3** (3 beeps)." % (auto, len(job["cues"]), len(qs)))
+        await _question(uid)
+    except Exception as exc:
+        log.exception("trailer job failed")
+        await say("❌ %s" % exc)
+
+
+def _mmss(t: float) -> str:
+    return "%d:%02d" % (t // 60, t % 60)
+
+
+async def _question(uid: int) -> None:
+    st = _ask.get(uid)
+    if not st:
+        return
+    if st["pos"] >= len(st["qs"]):
+        return await _finish(uid)
+    i = st["qs"][st["pos"]]
+    c = st["job"]["cues"][i]
+    sug = c["suggest"]
+    row = [IKB(str(k), "trl:pick:%d:%d" % (st["pos"], k)) for k in range(1, min(3, len(sug)) + 1)]
+    row2 = ([IKB("▶ 4–%d" % min(6, len(sug)), "trl:more:%d" % st["pos"])] if len(sug) > 3 else []) + \
+        [IKB("✖ None", "trl:pick:%d:0" % st["pos"])]
+    kb = IKM([row, row2, [IKB("🎬 Finish now (rest stays original)", "trl:finish")]])
+    cap = ("🎧 **Line %d/%d** · %s–%s\n“%s”"
+           % (st["pos"] + 1, len(st["qs"]), _mmss(c["t0"]), _mmss(c["t1"]), c["text"]))
+    await _deps["app"].send_voice(uid, str(st["jobdir"] / ("ask_%02d_p1.ogg" % i)), caption=cap, reply_markup=kb)
+
+
+async def _cb(_, cq):
+    uid = cq.from_user.id
+    data = cq.data
+    try:
+        if not _deps["allowed"](uid):
+            await cq.answer("private", show_alert=True)
+            return
+        if data == "trl:cancel":
+            _intake.pop(uid, None)
+            _ask.pop(uid, None)
+            await cq.answer("Cancelled")
+            try:
+                await cq.message.edit("🎬 Somali trailer — cancelled.")
+            except Exception:
+                pass
+            return
+        if data == "trl:nosubs":
+            if uid in _intake and _intake[uid]["step"] == "subs":
+                await cq.answer("No subtitles — the bot will listen to the trailer itself")
+                _start(uid)
+            else:
+                await cq.answer()
+            return
+        st = _ask.get(uid)
+        if not st:
+            await cq.answer("This trailer job has ended.", show_alert=True)
+            return
+        if data == "trl:finish":
+            await cq.answer("Building now")
+            _ask[uid]["pos"] = len(st["qs"])
+            return await _finish(uid)
+        parts = data.split(":")
+        pos = int(parts[2])
+        if pos != st["pos"]:
+            await cq.answer("Already answered")
+            return
+        i = st["qs"][pos]
+        if parts[1] == "more":
+            sug = st["job"]["cues"][i]["suggest"]
+            row = [IKB(str(k), "trl:pick:%d:%d" % (pos, k)) for k in range(4, len(sug) + 1)]
+            await cq.answer()
+            await _deps["app"].send_voice(uid, str(st["jobdir"] / ("ask_%02d_p2.ogg" % i)),
+                                          caption="🎧 Line %d — Somali 4, 5, 6" % (pos + 1),
+                                          reply_markup=IKM([row, [IKB("✖ None", "trl:pick:%d:0" % pos)]]))
+            return
+        k = int(parts[3])
+        st["choices"][str(i)] = k
+        json.dump(st["choices"], open(st["jobdir"] / "choices.json", "w"))
+        st["pos"] += 1
+        await cq.answer("✅ %s" % ("Somali %d" % k if k else "none — stays original"))
+        try:
+            await cq.message.edit_caption((cq.message.caption or "") + "\n\n➡️ %s" %
+                                          ("Somali %d" % k if k else "none"))
+        except Exception:
+            pass
+        await _question(uid)
+    finally:
+        cq.stop_propagation()
+
+
+async def _finish(uid: int) -> None:
+    st = _ask.pop(uid, None)
+    if not st:
+        return
+    app = _deps["app"]
+    jd = st["jobdir"]
+    msg = await app.send_message(uid, "🎬 Building your Somali trailer…")
+    out = str(jd / "somali_trailer.mp4")
+    proc = await asyncio.create_subprocess_exec(*ENGINE, "finish", "--job", str(jd), "--out", out,
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    raw, _ = await proc.communicate()
+    txt = raw.decode("utf-8", "replace")
+    m = re.search(r"FINISHED placed=(\d+) lines=(\d+)", txt)
+    if proc.returncode != 0 or not m or not os.path.exists(out):
+        tail = " › ".join(txt.strip().splitlines()[-3:])[:400]
+        return await msg.edit("❌ Building failed: " + tail)
+    picked = sum(1 for v in st["choices"].values() if v)
+    await msg.edit("✅ Done — sending…")
+    await app.send_video(uid, out, supports_streaming=True, caption=(
+        "🎬 **Somali trailer**\nSomali on **%s of %s** lines (%d automatic + %d you picked).\n"
+        "Picture identical to the official trailer." %
+        (m.group(1), m.group(2), int(m.group(1)) - picked, picked)))

@@ -3422,6 +3422,19 @@ async def _main() -> None:
     await app.stop()
 
 
+# /trailer -- Somali trailer (separate feature, trailer_flow.py). Its handlers sit in
+# group -2 and claim only their own messages and "trl:" buttons; everything else
+# reaches the handlers above exactly as before. If it cannot load, the bot runs
+# without it rather than not at all.
+try:
+    import trailer_flow
+    trailer_flow.register(
+        app, _allowed, _build_job,
+        lambda: any(a.get("phase") in ("Dub-sync", "Render", "Trim") for a in _active.values()))
+except Exception:
+    log.exception("/trailer not available")
+
+
 if __name__ == "__main__":
     log.info("Bidhaan Logo-Edit bot starting…")
     app.run(_main())
