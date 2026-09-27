@@ -25,6 +25,41 @@ def env(k):
             return line.split("=", 1)[1].strip().strip("\"")
 
 
+def video_meta(p):
+    """(duration s, width, height, thumbnail jpg or None) -- Telegram shows the black first frame
+    and no length without these (John 2026-09-27). The thumbnail is the most detailed,
+    well-exposed of 7 frames from 15-75 % of the video (as the bot's _make_thumb)."""
+    import subprocess
+    import tempfile
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=width,height:format=duration", "-of", "json", p],
+                       capture_output=True, text=True)
+    j = json.loads(r.stdout or "{}")
+    st = (j.get("streams") or [{}])[0]
+    dur = float((j.get("format") or {}).get("duration") or 0)
+    w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+    thumb = None
+    try:
+        from PIL import Image, ImageStat
+        d = tempfile.mkdtemp(prefix="sthumb_")
+        best = None
+        for frac in (0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75):
+            f = os.path.join(d, "f%02d.jpg" % int(frac * 100))
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", "%.2f" % max(1.0, dur * frac), "-i", p,
+                            "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "3", f])
+            if os.path.exists(f):
+                s = ImageStat.Stat(Image.open(f).convert("L"))
+                score = s.stddev[0] - 0.5 * abs(s.mean[0] - 115.0)
+                if best is None or score > best[0]:
+                    best = (score, f)
+        if best:
+            thumb = os.path.join(d, "thumb.jpg")
+            Image.open(best[1]).convert("RGB").save(thumb, "JPEG", quality=85)
+    except Exception as ex:
+        print("thumbnail skipped:", ex)
+    return int(dur), w, h, thumb
+
+
 async def main(a):
     items = json.load(open(a.manifest)) if a.manifest else [{"path": f, "caption": os.path.basename(f)} for f in a.files]
     app = Client("john_ie", api_id=int(env("API_ID")), api_hash=env("API_HASH"),
@@ -37,7 +72,18 @@ async def main(a):
             p, cap = it["path"], it.get("caption", "")[:1000]
             try:
                 if p.lower().endswith(VIDEO):
-                    await app.send_video("me", p, caption=cap, supports_streaming=True)
+                    dur, w, h, th = video_meta(p)
+                    last = [-10]
+
+                    def prog(cur, tot):
+                        pct = int(cur * 100 / tot) if tot else 0
+                        if pct >= last[0] + 10:
+                            last[0] = pct
+                            print("  upload %d%%" % pct, flush=True)
+                    await app.send_video("me", p, caption=cap, supports_streaming=True,
+                                         duration=dur, width=w, height=h, thumb=th,
+                                         file_name=it.get("file_name") or os.path.basename(p),
+                                         progress=prog)
                 elif p.lower().endswith(PHOTO):
                     await app.send_photo("me", p, caption=cap)
                 else:
