@@ -119,7 +119,7 @@ REPAIR_MIN_GAIN_S = 1.0  # a pass that buys less than this is not worth another
 # its [n/m] ticks all come from the first steps, so the bar used to reach ~97 %
 # of the stage early and then sit frozen for 20+ min while the later steps ran —
 # on 2026-09-26 that read as a stuck bot and a working job was cancelled.
-ANALYZE_STEPS = 17
+ANALYZE_STEPS = 16
 _STEP_MARK = "▶"
 
 
