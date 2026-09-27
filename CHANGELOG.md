@@ -1,5 +1,24 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-09-28
+
+### Added (John: "the bot must fix its own problems, not only report them")
+- **Dialogue gate + self-repair after the audio step:**
+  - If the dub's opening voice that the HD's timeline has was cut (Achcham: 16.4 s inside the
+    channel-logo shot), the bot puts it back: the HD's opening picture with the dub's sound,
+    aligned by waveform.
+  - The report shows the share of the dub's voice in the film, and every stretch that was cut
+    on purpose (adverts, channel intro).
+- **Picture check in the report:** wrong clips, repeats and spots (`frame_audit.py`).
+
+### Fixed
+- **Pushpa 2 shipped "dub only", with no end credits.** The work-dir hash picked the engine's
+  `.det.` scratch copy, so the audio step looked in an empty directory. `.det.` files are
+  now skipped.
+- The delivered file is always `.mp4`. Before, the source's `.mkv` name leaked into it.
+- `tools/bot_idle.sh`: a strict idle check before any restart. Any failure to look counts as
+  BUSY.
+
 ## 2026-09-27
 
 ### Changed (John: no premium account now; quality first; real thumbnails)
