@@ -689,7 +689,7 @@ async def _premium_probe(max_age: float = 600.0) -> bool | None:
 
 async def _premium_send(out_path: str, caption: str, duration: int,
                         w: int, h: int, target_uid: int | None = None,
-                        progress=None) -> str:
+                        progress=None, thumb: str | None = None) -> str:
     """Upload via the logged-in PREMIUM account (up to 4GB) and hand the result
     to `target_uid`.
 
@@ -717,7 +717,7 @@ async def _premium_send(out_path: str, caption: str, duration: int,
         me_bot = await app.get_me()
         dest = me_bot.username or "me"
         sent = await pu.send_video(dest, out_path, caption=caption,
-                                   duration=duration, width=w, height=h,
+                                   duration=duration, width=w, height=h, thumb=thumb,
                                    supports_streaming=True, progress=progress)
         prem_me = await pu.get_me()
     finally:
@@ -749,6 +749,50 @@ def _effective_bitrate(c: dict, dur: float) -> tuple[int, str]:
     return base, f"{base}k"
 
 
+async def _run_quiet(*cmd, timeout: float = 90.0) -> bytes:
+    """asyncio subprocess (never the blocking module inside the event loop -- see
+    dubsync_job._make_proxy); stdout bytes, b"" on any failure."""
+    try:
+        p = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
+                                                 stdout=asyncio.subprocess.PIPE,
+                                                 stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
+        return out or b""
+    except Exception:
+        return b""
+
+
+async def _make_thumb(path: str, dur: float) -> str | None:
+    """A real picture for the chat tile (John 2026-09-27: the bot's videos showed Telegram's
+    black first frame). Samples frames from 15-75 % of the film and keeps the one with the most
+    detail that is neither dark nor washed out; 320 px JPEG, well under Telegram's 200 KB."""
+    try:
+        import tempfile
+        from PIL import Image, ImageStat
+        tmpd = tempfile.mkdtemp(prefix="thumb_")
+        best = None
+        for frac in (0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75):
+            f = os.path.join(tmpd, "f%02d.jpg" % int(frac * 100))
+            await _run_quiet("ffmpeg", "-v", "error", "-y", "-ss", "%.2f" % max(1.0, dur * frac),
+                             "-i", path, "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "3", f)
+            if not os.path.exists(f):
+                continue
+            st = ImageStat.Stat(Image.open(f).convert("L"))
+            score = st.stddev[0] - 0.5 * abs(st.mean[0] - 115.0)
+            if best is None or score > best[0]:
+                best = (score, f)
+        if best is None:
+            return None
+        out = os.path.join(tmpd, "thumb.jpg")
+        im = Image.open(best[1]).convert("RGB")
+        im.thumbnail((320, 320))
+        im.save(out, "JPEG", quality=85)
+        return out
+    except Exception:
+        log.exception("thumbnail failed (Telegram will use its own)")
+        return None
+
+
 def _fit_bitrate(vk: int, dur: float, audio_k: int) -> tuple[int, str]:
     """Reduce `vk` only as far as needed for the file to fit the delivery cap.
 
@@ -760,6 +804,13 @@ def _fit_bitrate(vk: int, dur: float, audio_k: int) -> tuple[int, str]:
     cap = PREMIUM_LIMIT if _premium_session() else TG_LIMIT
     if estimate_size_bytes(dur, vk, audio_k) <= cap:
         return vk, ""
+    # John 2026-09-27: quality is never traded for Telegram's cap -- a film over it goes out as
+    # a MEGA link at full quality (Pushpa 2 was squeezed 2000k -> 1039k to fit 2 GB)
+    try:
+        if delivery.mega_is_configured():
+            return vk, " → over 2 GB: MEGA link, full quality"
+    except Exception:
+        pass
     # 7% headroom, not a guess: x264 with -maxrate/-bufsize overshoots the
     # nominal bitrate slightly and the HD intro adds seconds the estimate does
     # not model. Measured on Lenin, a 1714k target landed at 1.942 GiB against
@@ -2698,9 +2749,11 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         try:
             if await _premium_probe() is False:
                 await app.send_message(
-                    uid, "⚠️ Your premium login has expired, so this film is being "
-                         "sized to fit Telegram's 2 GB limit. Send /loginpremium to "
-                         "get up to 4 GB again.")
+                    uid, ("ℹ️ No premium login: a film over 2 GB is delivered as a MEGA "
+                          "link, at full quality." if delivery.mega_is_configured() else
+                          "⚠️ Your premium login has expired, so this film is being "
+                          "sized to fit Telegram's 2 GB limit. Send /loginpremium to "
+                          "get up to 4 GB again."))
         except Exception:
             log.exception("premium probe before render failed")
         _vk, _ = _effective_bitrate(c, _dur)
@@ -2971,8 +3024,9 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
                     except Exception:
                         pass
             await status.edit(f"⬆️ Uploading… ({human_size(sz)})")
+            _th = await _make_thumb(out, float(odur or 0))
             await reply_to.reply_video(out, duration=int(odur), width=ow, height=oh,
-                                       supports_streaming=True, caption=cap,
+                                       supports_streaming=True, caption=cap, thumb=_th,
                                        file_name=name, progress=_ulp)
             await _send_report()
             return True
@@ -2994,7 +3048,8 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
 
             await status.edit(f"⬆️ {human_size(sz)} — uploading via premium…")
             where = await _premium_send(out, cap, int(odur), ow, oh,
-                                        target_uid=uid, progress=_pp)
+                                        target_uid=uid, progress=_pp,
+                                        thumb=await _make_thumb(out, float(odur or 0)))
             if where != "your chat":
                 await reply_to.reply(f"{cap}\n📥 Sent to {where}.")
             await _send_report()
@@ -3014,7 +3069,17 @@ async def _deliver_file(uid: int, entry: dict, status: Message, reply_to: Messag
                     asyncio.run_coroutine_threadsafe(
                         status.edit(f"☁️ **Uploading to MEGA**\n`{_bar(pct)}`"), loop)
             link = await asyncio.to_thread(delivery.mega_upload, out, name, _mcb)
-            await reply_to.reply(f"{cap}\n📥 **MEGA link:**\n{link}")
+            _msg = f"{cap}\n📥 **MEGA link:**\n{link}"
+            _th = await _make_thumb(out, float(odur or 0))
+            try:
+                if _th and len(_msg) <= 1024:
+                    await reply_to.reply_photo(_th, caption=_msg)
+                else:
+                    if _th:
+                        await reply_to.reply_photo(_th)
+                    await reply_to.reply(_msg)
+            except Exception:
+                await reply_to.reply(_msg)
             await _send_report()
             return True
         except Exception as e:

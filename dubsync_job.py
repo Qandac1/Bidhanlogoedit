@@ -261,6 +261,19 @@ async def _make_proxy(src: Path, dst: Path, height: int,
         except asyncio.TimeoutError:
             stalled = True
             break
+        except asyncio.CancelledError:
+            # the job was cancelled: stop the encoder and delete the half-written proxy, or it
+            # runs on and the next job's encoder writes the same file (2026-09-27, Achcham)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except Exception:
+                pass
+            dst.unlink(missing_ok=True)
+            raise
         if not chunk:
             break
         buf += chunk.decode("utf-8", "replace")
@@ -775,7 +788,16 @@ async def run_dubsync(
             out = _sa_out
             stats["audio"] = "dub dialogue + HD master music"
         else:
-            stats["audio"] = "dub only (switch_audio produced no file)"
+            # keep the reason: Pushpa 2 shipped "dub only" and the cause was thrown away
+            _why = ""
+            try:
+                (OUT_DIR / f"{title}_switch_audio.log").write_text(_txt)
+                _tail = [x.strip() for x in _txt.splitlines() if x.strip()]
+                _why = _tail[-1][:160] if _tail else ""
+            except Exception:
+                pass
+            stats["audio"] = ("dub only (switch_audio produced no file"
+                              + (f": {_why}" if _why else "") + ")")
     except Exception as _aexc:
         stats["audio"] = "dub only (%s)" % type(_aexc).__name__
 

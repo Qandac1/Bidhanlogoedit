@@ -1,5 +1,24 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-09-27
+
+### Changed (John: no premium account now; quality first; real thumbnails)
+- **No more squeezing to 2 GB.** When MEGA is set up, a film over Telegram's limit keeps its
+  full bitrate and is delivered as a MEGA link (Pushpa 2 had been cut from 2000k to 1039k to
+  fit 2.07 GB; at 2000k it is ~3.6 GiB). Without MEGA the old fit-to-Telegram behaviour stays.
+  The "premium expired" notice now says the film goes by MEGA at full quality.
+- **Real thumbnail.** Deliveries showed Telegram's black first frame. The bot now picks the
+  most detailed, well-exposed frame from 15-75 % of the film (320 px JPEG) for the Telegram
+  video, the premium upload and the MEGA-link message (sent as a photo with the link).
+
+### Fixed
+- **A cancelled dub job left its proxy encoder running**; the next job's encoder wrote the same
+  file and the engine read it as 0 frames. `_make_proxy` now kills the encoder and deletes the
+  half-written proxy on cancel.
+- **"dub only" audio without a reason.** When switch_audio produces no file, its output is kept
+  in `out/<title>_switch_audio.log` and the caption says why.
+- Tests: `tools/test_bot_patch.py` (run inside the container, against /app) -- all pass.
+
 ## 2026-09-12
 
 ### Added
