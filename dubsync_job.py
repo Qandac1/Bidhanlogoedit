@@ -801,6 +801,41 @@ async def run_dubsync(
     except Exception as _aexc:
         stats["audio"] = "dub only (%s)" % type(_aexc).__name__
 
+    # ---- DIALOGUE GATE + SELF-REPAIR (John 2026-09-27) -----------------------
+    # Every second of the dub's voice must be in the film. The dub's opening voice that the
+    # HD's own timeline has (Achcham: 16.4 s cut with the channel logo) is put back here --
+    # the HD's opening picture, the dub's sound -- and the provenance is rewritten, so the
+    # gates below judge the repaired film. Adverts / channel intro stay cut and are listed.
+    try:
+        _rh_out = OUT_DIR / f"{title}_voice.mp4"
+        _rh = await asyncio.create_subprocess_exec(
+            DLG_PY, RESTORE_HEAD, title, str(out), str(_rh_out),
+            f"{int(bitrate_k)}k" if bitrate_k else "2000k",
+            "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        _rht = (await asyncio.wait_for(_rh.communicate(), timeout=5400))[0].decode("utf-8", "replace")
+        await _rh.wait()
+        _rl = [x.strip() for x in _rht.splitlines() if x.strip()]
+        _fin = [x for x in _rl if x.startswith("RESTORE_HEAD")]
+        if _fin and _fin[-1].startswith("RESTORE_HEAD DONE") and _rh_out.exists() \
+                and _rh_out.stat().st_size > 0:
+            out.unlink(missing_ok=True)
+            _rh_out.rename(out)
+            stats["voice_restored_s"] = float(_fin[-1].split()[-1])
+        elif _fin and "FAILED" in _fin[-1]:
+            stats["voice_restore"] = _fin[-1][:200]
+            _rh_out.unlink(missing_ok=True)
+        _pct = [x for x in _rl if "in the output:" in x]
+        if _pct:
+            stats["dialogue_pct"] = _pct[-1].split("in the output:")[-1].strip()
+            _after = _rl[_rl.index(_pct[-1]) + 1:]
+            stats["dialogue_lines"] = [x for x in _after if x.startswith("voice dub")]
+        _v = [x for x in _rl if x.startswith("DIALOGUE_AUDIT")]
+        if _v:
+            stats["dialogue_gate"] = _v[-1]
+    except Exception as _rhx:
+        stats["voice_restore"] = "not run (%s)" % type(_rhx).__name__
+
     # ---- GATE: jumps the dub did NOT make (skipped footage) ----------------
     try:
         _ca = await asyncio.create_subprocess_exec(
@@ -814,6 +849,22 @@ async def run_dubsync(
                 stats["cut_gate"] = _ln.strip()
     except Exception as _cexc:
         stats["cut_gate"] = "not run (%s)" % type(_cexc).__name__
+
+    # ---- PICTURE CHECK: every shot vs the dub's own frames (John: "like security") ----
+    # Read-only and fail-open: it reports, it never blocks a delivery.
+    try:
+        _fa = await asyncio.create_subprocess_exec(
+            DLG_PY, FRAME_AUDIT, title,
+            "--intro", "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
+            "--json", str(Path(_work_dir_for(hd, dub)) / "frame_audit.json"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        _fat = (await asyncio.wait_for(_fa.communicate(), timeout=1800))[0].decode("utf-8", "replace")
+        await _fa.wait()
+        _pa = _parse_frame_audit(_fat)
+        if _pa.get("verdict"):
+            stats["picture_check"] = _pa
+    except Exception as _faexc:
+        stats["picture_check"] = {"error": type(_faexc).__name__}
 
     # Release gate. A failure here is not a crash — the movie exists, it just
     # could not be proven clean, and the caller should say so rather than
@@ -881,6 +932,30 @@ def _audio_len_s(video) -> float:
 SWITCH_AUDIO = "/opt/dubsync2/switch_audio.py"
 CUT_AUDIT = "/opt/dubsync2/cut_audit.py"
 APPEND_CREDITS = "/opt/dubsync2/append_credits.py"
+FRAME_AUDIT = "/opt/dubsync2/tools/frame_audit.py"
+RESTORE_HEAD = "/opt/dubsync2/tools/restore_head.py"
+
+
+def _parse_frame_audit(text: str) -> dict:
+    """frame_audit.py output -> {"verdict", "checked", "ok", "wrong", "no_hd", "spots": [...]}."""
+    import re as _re
+    out = {"spots": []}
+    for ln in text.splitlines():
+        s = ln.strip()
+        m = _re.match(r"\S+: (\d+) shots with HD checked", s)
+        if m:
+            out["checked"] = int(m.group(1))
+        m = _re.match(r"ok (\d+) \(([0-9.]+)%\) \| wrong clip \(moved\) (\d+) \| HD the dub lacks "
+                      r"\(no_hd\) (\d+)", s)
+        if m:
+            out["ok"], out["ok_pct"] = int(m.group(1)), float(m.group(2))
+            out["wrong"], out["no_hd"] = int(m.group(3)), int(m.group(4))
+        m = _re.match(r"SPOT dub \S+ \(out (\S+)\): (\d+) shot\(s\).*?\b(moved|no_hd)\b", s)
+        if m:
+            out["spots"].append((m.group(1), int(m.group(2)), m.group(3)))
+        if s.startswith("FRAME_AUDIT"):
+            out["verdict"] = "green" if s.endswith("GREEN") else "red"
+    return out
 TG_FIT_BYTES = int(1.95 * 1024 ** 3)      # same cap as bot.TG_LIMIT
 DLG_SCRIPT = "/opt/dubsync2/dialogue_layer.py"
 
@@ -927,6 +1002,9 @@ def _work_dir_for(hd: Path, dub: Path) -> Path:
             if tag in p.name:
                 stem = p.name.split(tag)[0]
                 for cand in sorted(p.parent.glob('%s_%s_ORIG.*' % (stem, who))):
+                    if '.det.' in cand.name:
+                        continue    # the engine's detection scratch copy, never the master
+                                    # (Pushpa 2: hashing it sent the audio step to an empty dir)
                     return cand
         return p
 
@@ -1557,6 +1635,34 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
             _cg = st["cut_gate"]
             lines.append(("✅ cut gate: " + _cg) if _cg.startswith("UNJUSTIFIED CUTS: 0")
                          else ("⚠️ cut gate: " + _cg + " — jumps the dub did NOT make"))
+        if st.get("dialogue_gate"):
+            _dg, _dp = st["dialogue_gate"], st.get("dialogue_pct", "")
+            if st.get("voice_restored_s"):
+                lines.append(f"🗣 dialogue: restored {st['voice_restored_s']:.0f}s of the dub's opening "
+                             f"voice (on the HD's own opening) -- {_dp} of the dub's voice in the film")
+            elif " RED" in _dg or _dg.endswith("RED"):
+                lines.append(f"⚠️ dialogue: film voice was cut -- {_dp} of the dub's voice in the film:")
+            else:
+                lines.append(f"✅ dialogue: {_dp} of the dub's voice in the film")
+            for _dl in (st.get("dialogue_lines") or [])[:6]:
+                lines.append("   · " + _dl.replace("voice dub ", "dub "))
+        elif st.get("voice_restore"):
+            lines.append(f"⚠️ dialogue check: {st['voice_restore']}")
+        _pc = st.get("picture_check") or {}
+        if _pc.get("checked"):
+            _bad = int(_pc.get("wrong", 0)) + int(_pc.get("no_hd", 0))
+            if _pc.get("verdict") == "green":
+                lines.append(f"✅ picture check: all {_pc['checked']} shots match the dub")
+            else:
+                lines.append(f"⚠️ picture check: {_pc.get('ok_pct', 0):.1f}% of {_pc['checked']} shots "
+                             f"match the dub -- {_bad} to look at:")
+                for _out, _n, _what in (_pc.get("spots") or [])[:8]:
+                    lines.append(f"   · {_out} -- {_n} shot{'s' if _n != 1 else ''}, "
+                                 + ("wrong clip" if _what == "moved" else "picture the HD lacks"))
+                if len(_pc.get("spots") or []) > 8:
+                    lines.append(f"   · +{len(_pc['spots']) - 8} more (frame_audit.json)")
+        elif _pc.get("error"):
+            lines.append(f"⚠️ picture check not run ({_pc['error']})")
         # The ONE thing the engine must not decide alone. On Spider-Noir the
         # auto-detector found 0:37 while the real intro ended at 1:53, because
         # the dub had moved the title sequence to the front. Cutting on a weak

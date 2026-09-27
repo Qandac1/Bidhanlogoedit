@@ -2836,7 +2836,8 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
             cap += "\n\n🔎 Check these spots:\n" + "\n".join(shown)
             if len(dup_regions) > len(shown):
                 cap += f"\n…+{len(dup_regions)-len(shown)} more"
-        name = f"dubsync_{os.path.basename(hd_job['name'])}"
+        # always .mp4 (John): the render IS mp4; the source's .mkv/.webm name must not leak
+        name = f"dubsync_{os.path.splitext(os.path.basename(hd_job['name']))[0]}.mp4"
 
         # Same protection the branding path gets: keep the finished file in the
         # outbox BEFORE attempting delivery, so a 2h render is never lost to a
