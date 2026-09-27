@@ -119,7 +119,7 @@ REPAIR_MIN_GAIN_S = 1.0  # a pass that buys less than this is not worth another
 # its [n/m] ticks all come from the first steps, so the bar used to reach ~97 %
 # of the stage early and then sit frozen for 20+ min while the later steps ran —
 # on 2026-09-26 that read as a stuck bot and a working job was cancelled.
-ANALYZE_STEPS = 16
+ANALYZE_STEPS = 17
 _STEP_MARK = "▶"
 
 
@@ -1434,6 +1434,10 @@ def _quality_report(title: str) -> dict:
             try:
                 _pv = _json.load(open(_os.path.join(wd, 'provenance.json')))
                 _pv.sort(key=lambda r: r['final_start'])
+                # shots the HD master does not have play the dub's own picture (engine
+                # marks them dub_fallback): say so, John sees lower sharpness there
+                out['dub_pic_s'] = sum(r['final_end'] - r['final_start'] for r in _pv
+                                       if r.get('dub_fallback'))
                 hs = [(r['hd_start'], r['hd_end']) for r in _pv
                       if r.get('hd_start') is not None and r.get('hd_end') is not None]
             except Exception:
@@ -1561,6 +1565,9 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
                          f"worst {q['max_drift']:.2f}s (bounded at 2.00s)")
         if q.get("cut_s"):
             lines.append(f"✂️ channel material cut: {q['cut_s']:.0f}s")
+        if q.get("dub_pic_s"):
+            lines.append(f"🎞 dub's own picture: {q['dub_pic_s']:.0f}s -- shots this HD master "
+                         f"does not have (frame-proven)")
         if q.get("visible_s") is not None:
             _bn = q.get("benign_s") or 0.0
             lines.append(f"👁 visible repeats: {q['visible_s']:.1f}s"
