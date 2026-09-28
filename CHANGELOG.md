@@ -1,5 +1,13 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-09-28 (evening) — bot9 LIVE (6f5a10a)
+
+- **patch_bot_brandrepair:** the self-repair hands the job's brand JSON to auto_repair (`--brand`),
+  so a re-made shot keeps the channel logo; the cut summary gets the delivered film
+  (`make_cut_summary(..., film=res.path)` → `cut_list --film`) for the end-credits accounting.
+  Additive: unbranded jobs and old calls unchanged. 7 suites pass (brandrepair, restorefix,
+  autorepair, contract, cutsummary, samecontent, speedretry); container == tested bot9.
+
 ## 2026-09-28
 
 ### Added (John: "the bot must fix its own problems, not only report them")
