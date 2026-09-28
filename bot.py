@@ -2852,6 +2852,19 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         await prog.set("engine", 100, force=True)
         await prog.set("upload", 1, force=True)
         if await _deliver_file(uid, entry, status, msgs[0]):
+            # what the dub removed: plain Somali + English with a numbered picture (John's style)
+            try:
+                _nm = dubsync_job.pretty_name(hd_job["name"])
+                _ct, _ci = await dubsync_job.make_cut_summary(title, _nm, res.stats)
+                if _ct:
+                    await msgs[0].reply(_ct[:4000])
+                if _ci:
+                    await msgs[0].reply_photo(_ci, caption="✂️ %s — where the Somali channel cut the film" % _nm)
+                if not _ct:
+                    await msgs[0].reply("✂️ Cut summary could not be made: %s"
+                                        % str(res.stats.get("cut_summary_error", "unknown"))[:300])
+            except Exception as _cse:
+                log.warning("cut summary not sent for %s: %s", title, _cse)
             _remove_pending(uid, saved)
             try:
                 os.remove(saved)

@@ -312,6 +312,23 @@ async def _make_proxy(src: Path, dst: Path, height: int,
     return True
 
 
+def _same_content(a: Path, b: Path, chunk: int = 8 * 1024 * 1024) -> bool:
+    """Same size and the same first and last `chunk` bytes (sha256)."""
+    sa, sb = os.path.getsize(a), os.path.getsize(b)
+    if sa != sb:
+        return False
+    for off in (0, max(0, sa - chunk)):
+        ha, hb = hashlib.sha256(), hashlib.sha256()
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            fa.seek(off)
+            fb.seek(off)
+            ha.update(fa.read(chunk))
+            hb.update(fb.read(chunk))
+        if ha.digest() != hb.digest():
+            return False
+    return True
+
+
 async def prepare_inputs(hd_src: Path, dub_src: Path, title: str,
                          out_height: int = 1080, on_line=None,
                          on_progress=None) -> tuple[Path, Path]:
@@ -347,6 +364,14 @@ async def prepare_inputs(hd_src: Path, dub_src: Path, title: str,
         # source is already in place.
         try:
             if dst.exists() and src.exists() and os.path.samefile(src, dst):
+                continue
+        except OSError:
+            pass
+        # SAME-CONTENT GUARD: a re-sent identical file keeps the copy already in raw/ -- its
+        # mtime is part of the engine's cache keys, so replacing it redid the whole analysis
+        # (Bheemaa re-sent 2026-09-28: 1.5 h). Different content is replaced as before.
+        try:
+            if dst.exists() and src.exists() and _same_content(src, dst):
                 continue
         except OSError:
             pass
@@ -913,6 +938,43 @@ async def run_dubsync(
     except Exception as _rhx:
         stats["voice_restore"] = "not run (%s)" % type(_rhx).__name__
 
+    # ---- SELF-REPAIR: wrong clips the cut check proves (John 2026-09-28) -----
+    # "the film carried straight on here": the shot is re-placed at the carry-on place only when
+    # its own frames prove it (tools/auto_repair.py), spliced in, the sound untouched -- before
+    # the gates below, so they judge the repaired film.
+    try:
+        if _cancelled():
+            return DubResult(False, None, "cancelled", stats)
+        _ar_out = OUT_DIR / f"{title}_repaired.mp4"
+        _ar = await asyncio.create_subprocess_exec(
+            DLG_PY, AUTO_REPAIR, title, str(out), str(_ar_out),
+            "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
+            "--bitrate", f"{int(bitrate_k)}k" if bitrate_k else "2000k",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        if register:
+            register(_ar)
+        _art = (await asyncio.wait_for(_ar.communicate(), timeout=3600))[0].decode("utf-8", "replace")
+        await _ar.wait()
+        _arl = [x.strip() for x in _art.splitlines() if x.strip()]
+        _fin = [x for x in _arl if x.startswith("AUTO_REPAIR")]
+        if _fin and _fin[-1].startswith("AUTO_REPAIR DONE") and _ar_out.exists() \
+                and _ar_out.stat().st_size > 0:
+            out.unlink(missing_ok=True)
+            _ar_out.rename(out)
+            for _x in _arl:
+                if _x.startswith("defect at film"):
+                    _t = float(_x.split()[3])
+                    _idx = _x.split("dub#")[1].split()[0] if "dub#" in _x else ""
+                    if any(y.startswith("PROVEN dub#%s:" % _idx) for y in _arl):
+                        stats.setdefault("contract_healed", []).append(
+                            "wrong clip at %d:%02d:%02d re-placed (its frames proved it)"
+                            % (_t // 3600, _t % 3600 // 60, _t % 60))
+        elif _fin and "FAILED" in _fin[-1]:
+            stats["auto_repair"] = _fin[-1][:200]
+            _ar_out.unlink(missing_ok=True)
+    except Exception as _arx:
+        stats["auto_repair"] = "not run (%s)" % type(_arx).__name__
+
     # ---- GATE: jumps the dub did NOT make (skipped footage) ----------------
     try:
         _ca = await asyncio.create_subprocess_exec(
@@ -1024,6 +1086,49 @@ async def run_dubsync(
                      stats)
 
 
+CUT_LIST = "/opt/dubsync2/tools/cut_list.py"
+CUT_SUMMARY = "/opt/dubsync2/tools/cut_summary.py"
+
+
+def pretty_name(fname: str) -> str:
+    """'Half.Girlfriend.2017.1080p.NF.WEB-DL...mkv' -> 'Half Girlfriend (2017)'."""
+    base = os.path.splitext(os.path.basename(fname))[0]
+    base = re.sub(r"[._]+", " ", base).strip()
+    base = re.sub(r"^(\(.*?\)|\[.*?\]|@\S+)\s*", "", base)   # a leading (tag) / [tag] / @channel word
+    m = re.search(r"\b(19|20)\d{2}\b", base)
+    if m:
+        name = base[:m.start()].strip(" -([")
+        if name:
+            return "%s (%s)" % (name, m.group(0))
+    return base[:60]
+
+
+async def make_cut_summary(title: str, name: str, stats: dict):
+    """(text, picture path): what the dub removed from the HD, plain Somali + English with one
+    numbered picture. (None, None) when it cannot be made; the reason is in stats."""
+    try:
+        intro = float(stats.get("hd_intro_s", 0.0) or 0.0)
+        cj, img = OUT_DIR / f"{title}_cuts.json", OUT_DIR / f"{title}_cuts.jpg"
+        p1 = await asyncio.create_subprocess_exec(
+            DLG_PY, CUT_LIST, title, "--intro", "%.3f" % intro, "--json", str(cj),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        o1 = (await asyncio.wait_for(p1.communicate(), timeout=600))[0].decode("utf-8", "replace")
+        if "CUT_LIST" not in o1 or not cj.exists():
+            raise RuntimeError("cut list: " + o1.strip()[-160:])
+        p2 = await asyncio.create_subprocess_exec(
+            DLG_PY, CUT_SUMMARY, title, str(cj), str(img), name,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        o2 = (await asyncio.wait_for(p2.communicate(), timeout=900))[0].decode("utf-8", "replace")
+        lines = o2.splitlines()
+        if not any(x.startswith("CUT_SUMMARY") for x in lines) or not img.exists():
+            raise RuntimeError("summary: " + o2.strip()[-160:])
+        body = "\n".join("" if x == "---" else x for x in lines if not x.startswith("CUT_SUMMARY"))
+        return body.strip(), str(img)
+    except Exception as exc:
+        stats["cut_summary_error"] = "%s: %s" % (type(exc).__name__, str(exc)[:160])
+        return None, None
+
+
 def _contract_missing(st: dict, out) -> list:
     """What a finished conform delivery must have, checked after the retries. Each missing
     item is one short line for the top of the report. Facts about the FILE come from the file."""
@@ -1033,6 +1138,9 @@ def _contract_missing(st: dict, out) -> list:
                                                             or "did not run")[:140])
     if not st.get("dialogue_gate"):
         miss.append("dialogue check: " + str(st.get("voice_restore") or "did not run")[:140])
+    elif "RESTORE" in str(st.get("dialogue_gate")) and not st.get("voice_restored_s"):
+        miss.append("opening voice: the film's opening Somali voice is not in the film -- "
+                    + str(st.get("voice_restore") or "the repair did not run")[:120])
     if not str(st.get("cut_gate", "")).startswith("UNJUSTIFIED CUTS"):
         miss.append("cut check: " + str(st.get("cut_gate") or "did not run")[:140])
     _pc = st.get("picture_check") or {}
@@ -1073,6 +1181,7 @@ CUT_AUDIT = "/opt/dubsync2/cut_audit.py"
 APPEND_CREDITS = "/opt/dubsync2/append_credits.py"
 FRAME_AUDIT = "/opt/dubsync2/tools/frame_audit.py"
 RESTORE_HEAD = "/opt/dubsync2/tools/restore_head.py"
+AUTO_REPAIR = "/opt/dubsync2/tools/auto_repair.py"
 
 
 def _parse_frame_audit(text: str) -> dict:
@@ -1737,8 +1846,10 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
         lines.append(f"⛔ **{len(_miss)} step(s) did not finish** (each was tried twice):")
         for _x in _miss[:6]:
             lines.append("   · " + _x)
-    for _h in (st.get("contract_healed") or [])[:4]:
+    for _h in (st.get("contract_healed") or [])[:6]:
         lines.append("🩹 self-repaired: " + _h)
+    if st.get("auto_repair"):
+        lines.append("⚠️ wrong-clip self-repair: " + str(st["auto_repair"])[:160])
     if not _passed:
         _bs = "s" if _nblock != 1 else ""
         lines.append(f"⛔ **Integrity gate FAILED** — {_nblock} blocker{_bs}. Delivered "
@@ -1789,6 +1900,10 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
             if st.get("voice_restored_s"):
                 lines.append(f"🗣 dialogue: restored {st['voice_restored_s']:.0f}s of the dub's opening "
                              f"voice (on the HD's own opening) -- {_dp} of the dub's voice in the film")
+            elif "RESTORE" in _dg:
+                lines.append("⚠️ dialogue: the film's opening voice was NOT put back (%s) -- %s of the "
+                             "dub's voice in the film:" % (str(st.get("voice_restore") or "the repair "
+                                                               "did not run")[:120], _dp))
             elif " RED" in _dg or _dg.endswith("RED"):
                 lines.append(f"⚠️ dialogue: film voice was cut -- {_dp} of the dub's voice in the film:")
             else:
