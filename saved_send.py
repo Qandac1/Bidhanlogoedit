@@ -14,6 +14,25 @@ import json
 import os
 
 from pyrogram import Client
+from pyrogram.session.session import Session as _Session
+
+_invoke = _Session.invoke
+
+
+async def _invoke_patient(self, query, retries=None, timeout=None, sleep_threshold=None):
+    """pyrogram's upload workers call session.invoke(part) with its FIXED 10 s flood limit and
+    DROP the part on a longer wait (non-premium big uploads get FLOOD_PREMIUM_WAIT 11 s): the
+    upload then fails after sending 2 GB (Half Girlfriend, 2026-09-28). Every call waits up to
+    300 s instead; the client's own sleep_threshold does not reach those workers."""
+    kw = {"sleep_threshold": 300 if sleep_threshold is None else max(sleep_threshold, 300)}
+    if retries is not None:
+        kw["retries"] = retries
+    if timeout is not None:
+        kw["timeout"] = timeout
+    return await _invoke(self, query, **kw)
+
+
+_Session.invoke = _invoke_patient
 
 VIDEO = (".mp4", ".mov", ".mkv", ".webm")
 PHOTO = (".jpg", ".jpeg", ".png", ".webp")
