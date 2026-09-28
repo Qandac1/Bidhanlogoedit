@@ -13,7 +13,9 @@ NOT the "mids" in /app/data/dub_queue.json -- those are the BOT's numbering of t
 chat; forwarding them from John's side forwards unrelated old messages (2026-09-27).
 Full films: the bot reads both files before the panel appears -- waits up to 10 min.
 
-Usage: /opt/media-os/venv/bin/python e2e_queue_films.py HD,DUB [HD,DUB ...]
+Usage: /opt/media-os/venv/bin/python e2e_queue_films.py [--no-brand] HD,DUB [HD,DUB ...]
+  --no-brand: press "Branding" on each panel until it reads "Branding: OFF" (John 2026-09-29: a clean
+  film, no logo); Start is NEVER pressed unless the panel shows OFF.
 Prints QUEUED OK when every film started or was queued.
 """
 import asyncio
@@ -28,6 +30,12 @@ def env(k):
     for line in open("/opt/Streamnxt/.env"):
         if line.startswith(k + "="):
             return line.split("=", 1)[1].strip().strip("\"")
+
+
+def labels(m):
+    if not m.reply_markup or not getattr(m.reply_markup, "inline_keyboard", None):
+        return []
+    return [b.text for row in m.reply_markup.inline_keyboard for b in row]
 
 
 def buttons(m):
@@ -75,6 +83,18 @@ async def main(pairs):
                 ok = False
                 break
             print("film %d panel:\n  %s" % (n, (panel.text or "").replace("\n", "\n  ")[:900]))
+            if NO_BRAND:
+                for _ in range(2):
+                    if any("Branding: OFF" in x for x in labels(panel)):
+                        break
+                    await press(app, panel.id, "dub:brand")
+                    await asyncio.sleep(3)
+                    panel = await app.get_messages(BOT, panel.id)
+                if not any("Branding: OFF" in x for x in labels(panel)):
+                    print("film %d: the panel does not show Branding: OFF (%s) -- NOT started" % (n, labels(panel)))
+                    ok = False
+                    break
+                print("film %d: Branding: OFF confirmed on the panel" % n)
             await press(app, panel.id, "dub:start")
             await asyncio.sleep(5)
             panel = await app.get_messages(BOT, panel.id)
@@ -93,5 +113,6 @@ async def main(pairs):
     print("QUEUED OK" if ok else "QUEUE FAILED")
 
 
-pairs = [tuple(int(x) for x in a.split(",")) for a in sys.argv[1:]]
+NO_BRAND = "--no-brand" in sys.argv
+pairs = [tuple(int(x) for x in a.split(",")) for a in sys.argv[1:] if a != "--no-brand"]
 asyncio.run(main(pairs))

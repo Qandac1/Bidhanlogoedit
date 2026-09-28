@@ -1,5 +1,17 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-09-29 (night) — bot11 LIVE (6ea1b96): the film start by John's rule
+
+- The opening step now runs BEFORE the voice restore: HD logo intro, then the film from the first
+  moment both copies share (first run of shared pictures, or the first Somali voice lining up with
+  an actor speaking in the HD). The Somali copy's own intro (channel logo, tape card, the dubber's
+  "presents" and narrator) is cut, and so is what only the HD has. The report says where the film
+  starts and what was cut. Engine tools 4cc998798 (opening_restore / dialogue_audit / insert_head).
+- Regression set (tools/opening_regress.py) 6/6: Bheemaa, Achcham, Half Girlfriend, CBI 5, Battle of
+  Defense, the bot's Achcham -- each checked by eye.
+- e2e_queue_films.py --no-brand (Start only after the panel shows Branding: OFF).
+- First real run: Bheemaa (60303 + 60304), no logo, queued 00:4x.
+
 ## 2026-09-28 (evening) — bot9 LIVE (6f5a10a)
 
 - **patch_bot_brandrepair:** the self-repair hands the job's brand JSON to auto_repair (`--brand`),
