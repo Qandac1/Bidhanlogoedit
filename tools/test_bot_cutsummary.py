@@ -1,6 +1,6 @@
 """Proves patch_bot_cutsummary inside the bot container on real data:
   pretty_name on John's real file names; make_cut_summary on Half Girlfriend (its approved summary:
-  8 places, 'ku dhawaad 10 daqiiqo', the censored place, a picture); a title with no work -> (None,
+  8 places, 'ku dhawaad 10 daqiiqo', the Somali-picture place in neutral words, a picture); a title with no work -> (None,
   None) and the reason recorded (never silent).
 Usage: python3 test_bot_cutsummary.py <patched bot dir>     prints CUTSUMMARY_TESTS ALL PASS"""
 import asyncio
@@ -33,7 +33,10 @@ for fn, want in [("Half.Girlfriend.2017.1080p.NF.WEB-DL.DDP5.1.x264-AtishMK.mkv"
 st = {"hd_intro_s": 11.0}
 txt, img = asyncio.run(m.make_cut_summary("halfgirlfriend2017_6a7c28", "Half Girlfriend (2017)", st))
 check("summary text made", bool(txt) and "ku dhawaad 10 daqiiqo" in txt and "about 10 minutes" in txt, txt)
-check("8 places, censored place named", bool(txt) and "8. 1:54:12-1:54:34" in txt and "faafreebay" in txt, txt)
+check("8 places, the Somali-picture place named in neutral words", bool(txt) and "\n8. " in txt
+      and "muuqaalka nooca Soomaaliga" in txt and "own picture is used" in txt, txt)
+check("never the word censored without proof", bool(txt) and "faafreebay" not in txt
+      and "censored" not in txt.lower(), txt)
 check("picture made", bool(img) and os.path.getsize(img) > 20000, img)
 st2 = {}
 t2, i2 = asyncio.run(m.make_cut_summary("no_such_title_xyz", "X", st2))
