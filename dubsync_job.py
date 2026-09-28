@@ -950,6 +950,8 @@ async def run_dubsync(
             DLG_PY, AUTO_REPAIR, title, str(out), str(_ar_out),
             "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
             "--bitrate", f"{int(bitrate_k)}k" if bitrate_k else "2000k",
+            # a re-made shot keeps the channel logo (Bheemaa 2026-09-28: 9 shots lost it)
+            *(["--brand", str(brand_path)] if brand_path else []),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         if register:
             register(_ar)
@@ -1103,7 +1105,7 @@ def pretty_name(fname: str) -> str:
     return base[:60]
 
 
-async def make_cut_summary(title: str, name: str, stats: dict):
+async def make_cut_summary(title: str, name: str, stats: dict, film: str | None = None):
     """(text, picture path): what the dub removed from the HD, plain Somali + English with one
     numbered picture. (None, None) when it cannot be made; the reason is in stats."""
     try:
@@ -1111,6 +1113,7 @@ async def make_cut_summary(title: str, name: str, stats: dict):
         cj, img = OUT_DIR / f"{title}_cuts.json", OUT_DIR / f"{title}_cuts.jpg"
         p1 = await asyncio.create_subprocess_exec(
             DLG_PY, CUT_LIST, title, "--intro", "%.3f" % intro, "--json", str(cj),
+            *(["--film", str(film)] if film and os.path.exists(str(film)) else []),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         o1 = (await asyncio.wait_for(p1.communicate(), timeout=600))[0].decode("utf-8", "replace")
         if "CUT_LIST" not in o1 or not cj.exists():

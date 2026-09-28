@@ -2855,7 +2855,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
             # what the dub removed: plain Somali + English with a numbered picture (John's style)
             try:
                 _nm = dubsync_job.pretty_name(hd_job["name"])
-                _ct, _ci = await dubsync_job.make_cut_summary(title, _nm, res.stats)
+                _ct, _ci = await dubsync_job.make_cut_summary(title, _nm, res.stats, film=res.path)
                 if _ct:
                     await msgs[0].reply(_ct[:4000])
                 if _ci:
