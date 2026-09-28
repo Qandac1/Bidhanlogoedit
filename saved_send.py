@@ -121,5 +121,9 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--header", default="")
 ap.add_argument("--footer", default="")
 ap.add_argument("--manifest", default="")
+ap.add_argument("--header-file", default="", help="header text read from a file (multi-line tables)")
 ap.add_argument("files", nargs="*")
-asyncio.run(main(ap.parse_args()))
+_a = ap.parse_args()
+if _a.header_file:
+    _a.header = open(_a.header_file, encoding="utf-8").read().strip()[:4000]
+asyncio.run(main(_a))
