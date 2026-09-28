@@ -1,6 +1,7 @@
-"""Proves patch_bot_opening (harness from test_bot_restorefix): the opening gate runs after the voice
-restore and before the wrong-clip repair; DONE replaces the film and says so; REPORT is an info line;
-FAILED is INCOMPLETE at the top; NOT NEEDED adds nothing.
+"""Proves patch_bot_opening + patch_bot_opening2 (bot11; harness from test_bot_restorefix): the opening
+step runs BEFORE the voice restore and before the wrong-clip repair; DONE replaces the film and the
+report says where the film starts and what was cut; "shared nothing" and REPORT are info lines; FAILED
+is INCOMPLETE at the top; NOT NEEDED adds nothing.
 Usage: python3 test_bot_opening.py <patched bot dir>   prints OPENING_TESTS ALL PASS"""
 import asyncio
 import importlib.util
@@ -44,8 +45,11 @@ mode = os.environ.get("OG_MODE", "none")
 if mode == "done":
     shutil.copy(a[1], a[2])
     open(a[2], "ab").write(b"OPENED")
-    print("OPENING_GATE ADD 13.07 57.88 44.8")
-    print("OPENING_RESTORE DONE 44.80")
+    print("OPENING_NOTE the film now starts at 0:29 of the Somali copy (first shared picture): 29s of film added; cut: the Somali copy's own intro before it and 16s the HD alone has")
+    print("OPENING_RESTORE DONE 28.88")
+elif mode == "shared-nothing":
+    print("OPENING_NOTE the Somali copy shares nothing with the HD before the film's first scene: its own intro is cut, the film starts after the HD's logo intro")
+    print("OPENING_RESTORE NOT NEEDED")
 elif mode == "report":
     print("OPENING_GATE ADD 13.07 19.96 6.9")
     print("OPENING_RESTORE REPORT 13.07 19.96 (not proven film -- left out, nothing changed)")
@@ -145,11 +149,12 @@ def film_bytes(res):
 
 os.environ["OG_MODE"] = "done"
 res, cap, order = run("nothing")
-check("order: voice restore -> opening -> wrong-clip repair",
-      "opening_restore" in order and order.index("restore_head") < order.index("opening_restore")
+check("order: opening -> voice restore -> wrong-clip repair",
+      "opening_restore" in order and order.index("opening_restore") < order.index("restore_head")
       < order.index("auto_repair"), order)
 check("done: the film is the repaired one", b"OPENED" in film_bytes(res), res.path)
-check("done: the report says what was put back", "🎬 opening: put back 45s" in cap, cap)
+check("done: the report says where the film starts and what was cut",
+      "🎬 opening: the film now starts at 0:29 of the Somali copy" in cap and "cut:" in cap, cap)
 check("done: no INCOMPLETE", "INCOMPLETE" not in cap, cap)
 os.environ["OG_MODE"] = "report"
 res, cap, order = run("nothing")
@@ -160,6 +165,10 @@ res, cap, order = run("nothing")
 check("failed: INCOMPLETE at the top, naming the opening",
       "INCOMPLETE" in cap.splitlines()[0] and "opening" in cap, cap)
 check("failed: the unrepaired film is still delivered", res.ok and b"OPENED" not in film_bytes(res), res.message)
+os.environ["OG_MODE"] = "shared-nothing"
+res, cap, order = run("nothing")
+check("shared nothing: an info line, no INCOMPLETE", "ℹ️ opening: the Somali copy shares nothing" in cap
+      and "INCOMPLETE" not in cap, cap)
 os.environ["OG_MODE"] = "none"
 res, cap, order = run("nothing")
 check("not needed: no opening line, no INCOMPLETE", "opening:" not in cap and "INCOMPLETE" not in cap, cap)
