@@ -59,6 +59,7 @@ if a[0] == "integrity":
 '''
 TOOLS = {
     "switch_audio": 'import shutil,sys; a=sys.argv[1:]; shutil.copy(a[a.index("--video")+1], a[a.index("--out")+1])',
+    "opening_restore": 'print("OPENING_GATE OK"); print("OPENING_RESTORE NOT NEEDED")',
     "restore_head": 'print("t: in the output: 100.0%"); print("DIALOGUE_AUDIT GREEN"); print("RESTORE_HEAD NOT NEEDED")',
     "cut_audit": 'print("UNJUSTIFIED CUTS: 0")',
     "frame_audit": 'print("t: 1 shots with HD checked, 0 show the dub\'s own picture"); '

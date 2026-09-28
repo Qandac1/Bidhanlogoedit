@@ -1,7 +1,7 @@
-"""Proves patch_bot_brandrepair (harness from test_bot_restorefix): a BRANDED job hands its brand
-JSON to auto_repair (--brand), an unbranded one does not; make_cut_summary passes --film only when
-given an existing film. Usage: python3 test_bot_brandrepair.py <patched bot dir>
-prints BRANDREPAIR_TESTS ALL PASS"""
+"""Proves patch_bot_opening (harness from test_bot_restorefix): the opening gate runs after the voice
+restore and before the wrong-clip repair; DONE replaces the film and says so; REPORT is an info line;
+FAILED is INCOMPLETE at the top; NOT NEEDED adds nothing.
+Usage: python3 test_bot_opening.py <patched bot dir>   prints OPENING_TESTS ALL PASS"""
 import asyncio
 import importlib.util
 import os
@@ -36,7 +36,26 @@ if a[0] == "integrity":
 ''',
     "switch_audio": 'import os,shutil,sys; a=sys.argv[1:]; open(os.environ["FAKE_LOG"],"a").write("switch_audio\\n"); '
                     'shutil.copy(a[a.index("--video")+1], a[a.index("--out")+1])',
-    "opening_restore": 'print("OPENING_GATE OK"); print("OPENING_RESTORE NOT NEEDED")',
+    "opening_restore": r'''
+import os, shutil, sys
+a = sys.argv[1:]
+open(os.environ["FAKE_LOG"], "a").write("opening_restore\n")
+mode = os.environ.get("OG_MODE", "none")
+if mode == "done":
+    shutil.copy(a[1], a[2])
+    open(a[2], "ab").write(b"OPENED")
+    print("OPENING_GATE ADD 13.07 57.88 44.8")
+    print("OPENING_RESTORE DONE 44.80")
+elif mode == "report":
+    print("OPENING_GATE ADD 13.07 19.96 6.9")
+    print("OPENING_RESTORE REPORT 13.07 19.96 (not proven film -- left out, nothing changed)")
+elif mode == "failed":
+    print("OPENING_GATE ADD 13.07 57.88 44.8")
+    print("OPENING_RESTORE FAILED auto-align: refusing")
+else:
+    print("OPENING_GATE OK")
+    print("OPENING_RESTORE NOT NEEDED")
+''',
     "restore_head": r'''
 import os
 open(os.environ["FAKE_LOG"], "a").write("restore_head\n")
@@ -53,7 +72,6 @@ else:
 import os, shutil, sys
 a = sys.argv[1:]
 open(os.environ["FAKE_LOG"], "a").write("auto_repair\n")
-open(os.environ["FAKE_LOG"] + ".ar", "w").write(" ".join(a))
 mode = os.environ["AR_MODE"]
 print("defect at film 5926.24 (dub 6000.30): dub#1903 shown at HD 6572.38; carry-on candidate HD 6567.11")
 print("defect at film 5509.44 (dub 5583.50): dub#1769 shown at HD 6138.19; carry-on candidate HD 6137.69")
@@ -100,7 +118,7 @@ def check(name, cond, detail=""):
     ok &= bool(cond)
 
 
-def run(mode, brand=None):
+def run(mode):
     d = T / mode
     shutil.rmtree(d, ignore_errors=True)
     (d / "out").mkdir(parents=True)
@@ -112,43 +130,38 @@ def run(mode, brand=None):
                        "ENGINE_WORK": str(work), "AR_MODE": mode})
     m.OUT_DIR = d / "out"
     m._work_dir_for = lambda hd, dub: work
-    res = asyncio.run(m.run_dubsync(FIX, FIX, "artest", brand, 320, 240, 23, lambda *a: None, bitrate_k=500))
+    res = asyncio.run(m.run_dubsync(FIX, FIX, "artest", None, 320, 240, 23, lambda *a: None, bitrate_k=500))
     cap = m.summary_caption("artest", res, 4.0, 1000) if res.ok else ""
-    arp = str(log) + ".ar"
-    return res, cap, (open(arp).read() if os.path.exists(arp) else "")
+    return res, cap, log.read_text().split()
 
 
 
 os.environ["RH_MODE"] = "ok"
-BR = {"logos": [{"path": "/nonexistent/logo.png", "corner": "TR", "frac": 0.134}], "logo_start": 120.0}
-res, cap, ar = run("done", brand=BR)
-check("branded job: auto_repair ran", ar != "", ar)
-check("branded job: auto_repair got --brand /tmp/brand_artest.json", "--brand /tmp/brand_artest.json" in ar, ar)
-res, cap, ar = run("done", brand=None)
-check("unbranded job: auto_repair ran", ar != "", ar)
-check("unbranded job: no --brand", "--brand" not in ar, ar)
-check("unbranded job: the rest of the call is unchanged", "--bitrate 500k" in ar, ar)
 
-# make_cut_summary: --film only for an existing film
-CL = T / "cl.py"
-CL.write_text('import os,sys,json; a=sys.argv[1:]; open(os.environ["CS_LOG"],"w").write(" ".join(a)); '
-              'json.dump({"cuts":[]}, open(a[a.index("--json")+1],"w")); print("CUT_LIST 0.0 0")')
-CS = T / "cs.py"
-CS.write_text('import sys; open(sys.argv[3],"wb").write(b"x"); print("text"); print("CUT_SUMMARY 0")')
-m.CUT_LIST, m.CUT_SUMMARY = str(CL), str(CS)
-m.OUT_DIR = T
-os.environ["CS_LOG"] = str(T / "cs.log")
-txt, img = asyncio.run(m.make_cut_summary("artest", "Film (2008)", {}, film=str(FIX)))
-got = open(T / "cs.log").read()
-check("summary with film: --film passed", ("--film " + str(FIX)) in got, got)
-check("summary with film: made", txt == "text" and img, (txt, img))
-asyncio.run(m.make_cut_summary("artest", "Film (2008)", {}, film=str(T / "gone.mp4")))
-got = open(T / "cs.log").read()
-check("summary with a missing film: no --film", "--film" not in got, got)
-asyncio.run(m.make_cut_summary("artest", "Film (2008)", {}))
-got = open(T / "cs.log").read()
-check("summary without film (old call): no --film", "--film" not in got, got)
-bot = open(os.path.join(NEW, "bot.py"), encoding="utf-8").read()
-check("bot.py passes the delivered file", "make_cut_summary(title, _nm, res.stats, film=res.path)" in bot)
+
+def film_bytes(res):
+    return open(res.path, "rb").read() if res.ok and res.path and os.path.exists(res.path) else b""
+
+
+os.environ["OG_MODE"] = "done"
+res, cap, order = run("nothing")
+check("order: voice restore -> opening -> wrong-clip repair",
+      "opening_restore" in order and order.index("restore_head") < order.index("opening_restore")
+      < order.index("auto_repair"), order)
+check("done: the film is the repaired one", b"OPENED" in film_bytes(res), res.path)
+check("done: the report says what was put back", "🎬 opening: put back 45s" in cap, cap)
+check("done: no INCOMPLETE", "INCOMPLETE" not in cap, cap)
+os.environ["OG_MODE"] = "report"
+res, cap, order = run("nothing")
+check("report: an info line, nothing changed", "ℹ️ opening" in cap and b"OPENED" not in film_bytes(res), cap)
+check("report: no INCOMPLETE", "INCOMPLETE" not in cap, cap)
+os.environ["OG_MODE"] = "failed"
+res, cap, order = run("nothing")
+check("failed: INCOMPLETE at the top, naming the opening",
+      "INCOMPLETE" in cap.splitlines()[0] and "opening" in cap, cap)
+check("failed: the unrepaired film is still delivered", res.ok and b"OPENED" not in film_bytes(res), res.message)
+os.environ["OG_MODE"] = "none"
+res, cap, order = run("nothing")
+check("not needed: no opening line, no INCOMPLETE", "opening:" not in cap and "INCOMPLETE" not in cap, cap)
 shutil.rmtree(T, ignore_errors=True)
-print("BRANDREPAIR_TESTS", "ALL PASS" if ok else "FAILED")
+print("OPENING_TESTS", "ALL PASS" if ok else "FAILED")

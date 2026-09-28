@@ -938,6 +938,43 @@ async def run_dubsync(
     except Exception as _rhx:
         stats["voice_restore"] = "not run (%s)" % type(_rhx).__name__
 
+    # ---- OPENING GATE + SELF-REPAIR (John 2026-09-28: "never again") -------
+    # The film's start is decided by PROOF, never by "nothing matched here": the first proven
+    # stretch extrapolated back to the end of the HD intro; dub seconds there are film unless
+    # proven otherwise (tools/opening_gate.py). Proven film missing at the start is put back (HD
+    # picture + the dub's sound, after the HD intro); "unsure" only -> reported, nothing changed.
+    try:
+        if _cancelled():
+            return DubResult(False, None, "cancelled", stats)
+        _og_out = OUT_DIR / f"{title}_opening.mp4"
+        _og = await asyncio.create_subprocess_exec(
+            DLG_PY, OPENING_RESTORE, title, str(out), str(_og_out),
+            f"{int(bitrate_k)}k" if bitrate_k else "2000k",
+            "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        if register:
+            register(_og)
+        _ogt = (await asyncio.wait_for(_og.communicate(), timeout=3600))[0].decode("utf-8", "replace")
+        await _og.wait()
+        _ol = [x.strip() for x in _ogt.splitlines() if x.strip()]
+        _of = [x for x in _ol if x.startswith("OPENING_RESTORE")]
+        _ogg = [x for x in _ol if x.startswith("OPENING_GATE")]
+        if _ogg:
+            stats["opening_gate"] = _ogg[-1][:160]
+        if _of and _of[-1].startswith("OPENING_RESTORE DONE") and _og_out.exists()                 and _og_out.stat().st_size > 0:
+            out.unlink(missing_ok=True)
+            _og_out.rename(out)
+            stats["opening_restored_s"] = float(_of[-1].split()[-1])
+        elif _of and _of[-1].startswith("OPENING_RESTORE REPORT"):
+            stats["opening_report"] = _of[-1][len("OPENING_RESTORE REPORT"):].strip()[:200]
+        elif _of and _of[-1].startswith("OPENING_RESTORE NOT NEEDED"):
+            pass
+        else:
+            stats["opening_restore"] = (_of[-1] if _of else "no result: " + (_ol[-1] if _ol else "no output"))[:200]
+            _og_out.unlink(missing_ok=True)
+    except Exception as _ogx:
+        stats["opening_restore"] = "not run (%s)" % type(_ogx).__name__
+
     # ---- SELF-REPAIR: wrong clips the cut check proves (John 2026-09-28) -----
     # "the film carried straight on here": the shot is re-placed at the carry-on place only when
     # its own frames prove it (tools/auto_repair.py), spliced in, the sound untouched -- before
@@ -1144,6 +1181,8 @@ def _contract_missing(st: dict, out) -> list:
     elif "RESTORE" in str(st.get("dialogue_gate")) and not st.get("voice_restored_s"):
         miss.append("opening voice: the film's opening Somali voice is not in the film -- "
                     + str(st.get("voice_restore") or "the repair did not run")[:120])
+    if st.get("opening_restore"):
+        miss.append("opening: the film's start may be missing -- " + str(st["opening_restore"])[:120])
     if not str(st.get("cut_gate", "")).startswith("UNJUSTIFIED CUTS"):
         miss.append("cut check: " + str(st.get("cut_gate") or "did not run")[:140])
     _pc = st.get("picture_check") or {}
@@ -1184,6 +1223,7 @@ CUT_AUDIT = "/opt/dubsync2/cut_audit.py"
 APPEND_CREDITS = "/opt/dubsync2/append_credits.py"
 FRAME_AUDIT = "/opt/dubsync2/tools/frame_audit.py"
 RESTORE_HEAD = "/opt/dubsync2/tools/restore_head.py"
+OPENING_RESTORE = "/opt/dubsync2/tools/opening_restore.py"
 AUTO_REPAIR = "/opt/dubsync2/tools/auto_repair.py"
 
 
@@ -1915,6 +1955,13 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
                 lines.append("   · " + _dl.replace("voice dub ", "dub "))
         elif st.get("voice_restore"):
             lines.append(f"⚠️ dialogue check: {st['voice_restore']}")
+        if st.get("opening_restored_s"):
+            lines.append(f"🎬 opening: put back {st['opening_restored_s']:.0f}s of the film's start "
+                         "(proven by its frames / voice)")
+        elif st.get("opening_restore"):
+            lines.append("⚠️ opening: the film's start is NOT complete -- " + str(st["opening_restore"])[:140])
+        elif st.get("opening_report"):
+            lines.append("ℹ️ opening: start material not proven film, left out: dub " + str(st["opening_report"])[:120])
         _pc = st.get("picture_check") or {}
         if _pc.get("checked"):
             _bad = int(_pc.get("wrong", 0)) + int(_pc.get("no_hd", 0))

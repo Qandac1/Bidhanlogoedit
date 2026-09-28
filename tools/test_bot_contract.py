@@ -68,6 +68,7 @@ else:
     shutil.copy(vid, out)
 print("HD passages: 3")
 ''',
+    "opening_restore": 'print("OPENING_GATE OK"); print("OPENING_RESTORE NOT NEEDED")',
     "restore_head": r'''
 import os
 open(os.environ["FAKE_LOG"], "a").write("restore_head\n")
@@ -118,7 +119,7 @@ def load(d, name):
     sys.path.remove(d)
     m.DUBSYNC = str(eng)
     m.DLG_PY = sys.executable
-    for k in ("switch_audio", "restore_head", "cut_audit", "frame_audit", "append_credits"):
+    for k in ("switch_audio", "restore_head", "opening_restore", "cut_audit", "frame_audit", "append_credits"):
         setattr(m, k.upper(), str(T / (k + ".py")))
     m._quality_report = lambda title: {}
     return m

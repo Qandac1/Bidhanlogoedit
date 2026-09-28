@@ -39,6 +39,7 @@ if a[0] == "integrity":
 ''',
     "switch_audio": 'import os,shutil,sys; a=sys.argv[1:]; open(os.environ["FAKE_LOG"],"a").write("switch_audio\\n"); '
                     'shutil.copy(a[a.index("--video")+1], a[a.index("--out")+1])',
+    "opening_restore": 'print("OPENING_GATE OK"); print("OPENING_RESTORE NOT NEEDED")',
     "restore_head": 'import os; open(os.environ["FAKE_LOG"],"a").write("restore_head\\n"); '
                     'print("t: in the output: 100.0%"); print("DIALOGUE_AUDIT GREEN"); print("RESTORE_HEAD NOT NEEDED")',
     "auto_repair": r'''
@@ -79,7 +80,7 @@ sys.path.insert(0, NEW)
 spec.loader.exec_module(m)
 m.DUBSYNC = str(eng)
 m.DLG_PY = sys.executable
-for k in ("switch_audio", "restore_head", "auto_repair", "cut_audit", "frame_audit", "append_credits"):
+for k in ("switch_audio", "restore_head", "opening_restore", "auto_repair", "cut_audit", "frame_audit", "append_credits"):
     setattr(m, k.upper(), str(T / (k + ".py")))
 m._quality_report = lambda title: {}
 ok = True

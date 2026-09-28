@@ -35,6 +35,7 @@ if a[0] == "integrity":
 ''',
     "switch_audio": 'import os,shutil,sys; a=sys.argv[1:]; open(os.environ["FAKE_LOG"],"a").write("switch_audio\\n"); '
                     'shutil.copy(a[a.index("--video")+1], a[a.index("--out")+1])',
+    "opening_restore": 'print("OPENING_GATE OK"); print("OPENING_RESTORE NOT NEEDED")',
     "restore_head": r'''
 import os
 open(os.environ["FAKE_LOG"], "a").write("restore_head\n")
@@ -85,7 +86,7 @@ sys.path.insert(0, NEW)
 spec.loader.exec_module(m)
 m.DUBSYNC = str(eng)
 m.DLG_PY = sys.executable
-for k in ("switch_audio", "restore_head", "auto_repair", "cut_audit", "frame_audit", "append_credits"):
+for k in ("switch_audio", "restore_head", "opening_restore", "auto_repair", "cut_audit", "frame_audit", "append_credits"):
     setattr(m, k.upper(), str(T / (k + ".py")))
 m._quality_report = lambda title: {"locked_pct": 100.0, "shots": 1}   # a real film always has one: the dialogue section renders
 ok = True
