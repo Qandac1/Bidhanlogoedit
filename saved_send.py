@@ -63,7 +63,8 @@ def video_meta(p):
 async def main(a):
     items = json.load(open(a.manifest)) if a.manifest else [{"path": f, "caption": os.path.basename(f)} for f in a.files]
     app = Client("john_ie", api_id=int(env("API_ID")), api_hash=env("API_HASH"),
-                 workdir="/opt/media-os/data", no_updates=True)
+                 workdir="/opt/media-os/data", no_updates=True,
+                 sleep_threshold=300)  # non-premium big uploads get FLOOD_PREMIUM_WAIT 11+ s: wait, never crash
     ok = 0
     async with app:
         if a.header:
