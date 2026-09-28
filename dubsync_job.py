@@ -514,6 +514,9 @@ async def run_dubsync(
     def _cancelled() -> bool:
         return bool(should_cancel and should_cancel())
 
+    _job_env = None          # every engine stage's environment (None = the bot's own)
+    _speed_retry = False     # one re-analysis with the speed matched, at most
+
     # Expand "repair" into alternating dedupe / re-plan cycles. Each cycle is
     # weighted evenly so the bar keeps moving through them; unused cycles hand
     # their weight back when the loop exits early.
@@ -551,7 +554,7 @@ async def run_dubsync(
         cmd = cmds[key]
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT)
+            stderr=asyncio.subprocess.STDOUT, env=_job_env)
         # Hand the process to the caller so /cancel and the Cancel button can
         # actually kill it — without this the job runs on after "cancelled".
         if register:
@@ -627,6 +630,11 @@ async def run_dubsync(
             # The cut gate needs this: every output timestamp is shifted by it.
             if (m := pat_hd_intro.search(line)):
                 stats["hd_intro_s"] = float(m.group(1))
+            # the engine's OWN work dir: every step after the render reads its provenance
+            # (Pushpa 2: a re-derived hash pointed at an empty dir -> no sound mix, no credits)
+            _m_pv = re.search(r"Provenance:\s*(\S+)/provenance\.json", line)
+            if _m_pv:
+                stats["engine_work"] = _m_pv.group(1)
 
             pct = (done_weight + weight * inner) / total_weight * 100.0
             if pct - last_emit >= 1.0 or shown != last_shown:
@@ -713,6 +721,30 @@ async def run_dubsync(
             except Exception:
                 _co = {}
             if _co.get("accepted") is False:
+                # SELF-REPAIR: refused while the speed check measured a consistent speed
+                # difference it did not correct -> one more analysis with the speed matched
+                _spd = {}
+                try:
+                    _spd = json.loads((_work_dir_for(hd, dub) / "speed.json").read_text())
+                except Exception:
+                    pass
+                _rr = float(_spd.get("ratio", 1.0) or 1.0)
+                _nw = int(_spd.get("windows", 0) or 0)
+                _ss = float(_spd.get("same_side", 0) or 0)
+                if (not _speed_retry and _spd.get("decision") == "same speed"
+                        and SPEED_RETRY_MIN <= abs(_rr - 1.0) < 0.025 and _nw >= 10
+                        and _ss >= 0.9 and float(_spd.get("gain", 0) or 0) >= 0.010):
+                    _speed_retry = True
+                    stats["speed_retry"] = round(_rr, 5)
+                    stats.setdefault("contract_healed", []).append(
+                        "placement refused; the dub runs %+.2f%% against the HD (%d of %d speed "
+                        "windows agree) -- analysed again with the speed matched"
+                        % (100 * (_rr - 1.0), int(round(_ss * _nw)), _nw))
+                    (_work_dir_for(hd, dub) / "speed.json").unlink(missing_ok=True)
+                    _job_env = dict(os.environ, DUBSYNC2_RETIME_MIN="%.4f" % SPEED_RETRY_MIN)
+                    done_weight -= weight
+                    i -= 1
+                    continue
                 _pct = _co.get("unconfirmed_pct")
                 stats["placement"] = str(_co.get("reason", ""))
                 return DubResult(
@@ -723,7 +755,11 @@ async def run_dubsync(
                        "this HD's picture, " if isinstance(_pct, (int, float))
                        else "The dub's shots could not be found in this HD, ")
                     + "so any render would put wrong clips on screen.\n"
-                    "Send an HD of the SAME version the dub was made from "
+                    + ("(Analysed twice: the second time with the dub's %+.2f%% speed "
+                       "difference matched -- still refused.)\n"
+                       % (100 * (float(stats["speed_retry"]) - 1.0))
+                       if stats.get("speed_retry") else "")
+                    + "Send an HD of the SAME version the dub was made from "
                     "(e.g. the WEB-DL / OTT release, not a PreDVD/cam copy), "
                     "then run /dub again.", stats)
 
@@ -736,6 +772,14 @@ async def run_dubsync(
     if not out.exists():
         return DubResult(False, None, "render produced no file", stats)
 
+    # ---- CONTRACT: every step after the render uses the engine's own work dir ----
+    _bot_work = Path(_work_dir_for(hd, dub))
+    _post_work = Path(stats["engine_work"]) if stats.get("engine_work") else _bot_work
+    if _post_work != _bot_work:
+        stats.setdefault("contract_healed", []).append(
+            "work dir: the bot's hash said %s, the engine wrote %s -- used the engine's"
+            % (_bot_work.name, _post_work.name))
+
     # ---- AUDIO: the dub for talking, the HD master for music it really has --
     # Without this the delivered film carries the dub track for 100% of its
     # runtime and none of the HD master's fight/music audio.
@@ -745,7 +789,7 @@ async def run_dubsync(
             await _pr
         _sa_out = OUT_DIR / f"{title}_v8.mp4"
         _sa = await asyncio.create_subprocess_exec(
-            DLG_PY, "-u", SWITCH_AUDIO, "--work", str(_work_dir_for(hd, dub)),
+            DLG_PY, "-u", SWITCH_AUDIO, "--work", str(_post_work),
             "--video", str(out), "--out", str(_sa_out), "--abitrate", "320k",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         if register:
@@ -801,6 +845,39 @@ async def run_dubsync(
     except Exception as _aexc:
         stats["audio"] = "dub only (%s)" % type(_aexc).__name__
 
+    if _cancelled():
+        return DubResult(False, None, "cancelled", stats)
+    # ---- CONTRACT: the audio step is never silently skipped -- one more try ----
+    if not str(stats.get("audio", "")).startswith("dub dialogue"):
+        stats["audio_first_try"] = stats.get("audio")
+        if not (_post_work / "provenance.json").exists():
+            stats["audio_retry"] = "not retried: no provenance.json in work/%s" % _post_work.name
+        else:
+            try:
+                _sa_out2 = OUT_DIR / f"{title}_v8.mp4"
+                _sa_out2.unlink(missing_ok=True)
+                _sa2 = await asyncio.create_subprocess_exec(
+                    DLG_PY, "-u", SWITCH_AUDIO, "--work", str(_post_work),
+                    "--video", str(out), "--out", str(_sa_out2), "--abitrate", "320k",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                if register:
+                    register(_sa2)
+                _t2 = (await _sa2.communicate())[0].decode("utf-8", "replace")
+                await _sa2.wait()
+                if _cancelled():
+                    return DubResult(False, None, "cancelled", stats)
+                if _sa_out2.exists() and _sa_out2.stat().st_size > 0:
+                    out = _sa_out2
+                    stats["audio"] = "dub dialogue + HD master music"
+                    stats.setdefault("contract_healed", []).append(
+                        "sound mix: failed once (%s), built on the second try"
+                        % str(stats.get("audio_first_try"))[:80])
+                else:
+                    _tl2 = [x.strip() for x in _t2.splitlines() if x.strip()]
+                    stats["audio_retry"] = "failed again: " + (_tl2[-1][:160] if _tl2 else "no output")
+            except Exception as _ax2:
+                stats["audio_retry"] = "failed again (%s)" % type(_ax2).__name__
+
     # ---- DIALOGUE GATE + SELF-REPAIR (John 2026-09-27) -----------------------
     # Every second of the dub's voice must be in the film. The dub's opening voice that the
     # HD's own timeline has (Achcham: 16.4 s cut with the channel logo) is put back here --
@@ -839,7 +916,7 @@ async def run_dubsync(
     # ---- GATE: jumps the dub did NOT make (skipped footage) ----------------
     try:
         _ca = await asyncio.create_subprocess_exec(
-            DLG_PY, CUT_AUDIT, str(_work_dir_for(hd, dub)), str(out), str(dub),
+            DLG_PY, CUT_AUDIT, str(_post_work), str(out), str(dub),
             "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         _ct = (await _ca.communicate())[0].decode("utf-8", "replace")
@@ -856,7 +933,7 @@ async def run_dubsync(
         _fa = await asyncio.create_subprocess_exec(
             DLG_PY, FRAME_AUDIT, title,
             "--intro", "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
-            "--json", str(Path(_work_dir_for(hd, dub)) / "frame_audit.json"),
+            "--json", str(_post_work / "frame_audit.json"),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         _fat = (await asyncio.wait_for(_fa.communicate(), timeout=1800))[0].decode("utf-8", "replace")
         await _fa.wait()
@@ -893,7 +970,7 @@ async def run_dubsync(
     # are appended to the FINISHED file -- after every check. Fail-open.
     try:
         _cr = await asyncio.create_subprocess_exec(
-            DLG_PY, APPEND_CREDITS, "--work", str(_work_dir_for(hd, dub)),
+            DLG_PY, APPEND_CREDITS, "--work", str(_post_work),
             "--video", str(out), "--out", str(out),
             "--keep-under", str(TG_FIT_BYTES),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -913,9 +990,71 @@ async def run_dubsync(
     except Exception as _crx:
         stats["credits"] = "not run (%s)" % type(_crx).__name__
 
+    # ---- CONTRACT: end credits are never silently lost -- one more try ----
+    _cr1 = str(stats.get("credits", ""))
+    if not _cr1 or _cr1.startswith(("not run", "CREDITS FAILED")):
+        try:
+            _crb = await asyncio.create_subprocess_exec(
+                DLG_PY, APPEND_CREDITS, "--work", str(_post_work),
+                "--video", str(out), "--out", str(out),
+                "--keep-under", str(TG_FIT_BYTES),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            _crt2 = (await _crb.communicate())[0].decode("utf-8", "replace")
+            await _crb.wait()
+            for _ln in _crt2.splitlines():
+                if _ln.startswith("CREDITS:"):
+                    _m = re.search(r"appended ([0-9.]+)s", _ln)
+                    if _m:
+                        stats["credits_s"] = float(_m.group(1))
+                        if stats.get("expected_duration_s"):
+                            stats["expected_duration_s"] = (
+                                float(stats["expected_duration_s"]) + float(_m.group(1)))
+                    stats["credits"] = _ln[len("CREDITS:"):].strip()
+                    stats.setdefault("contract_healed", []).append(
+                        "end credits: failed once (%s), added on the second try" % _cr1[:80])
+                elif _ln.startswith(("SKIP:", "CREDITS FAILED:")):
+                    stats["credits"] = _ln.strip()
+        except Exception as _crx2:
+            stats["credits"] = "not run twice (%s)" % type(_crx2).__name__
+
+    stats["contract_missing"] = _contract_missing(stats, out)
+
     return DubResult(True, out,
                      "released" if released else "delivered for review — integrity gate FAILED (NOT final)",
                      stats)
+
+
+def _contract_missing(st: dict, out) -> list:
+    """What a finished conform delivery must have, checked after the retries. Each missing
+    item is one short line for the top of the report. Facts about the FILE come from the file."""
+    miss = []
+    if not str(st.get("audio", "")).startswith("dub dialogue"):
+        miss.append("sound mix (dub talk + HD music): " + str(st.get("audio_retry") or st.get("audio")
+                                                            or "did not run")[:140])
+    if not st.get("dialogue_gate"):
+        miss.append("dialogue check: " + str(st.get("voice_restore") or "did not run")[:140])
+    if not str(st.get("cut_gate", "")).startswith("UNJUSTIFIED CUTS"):
+        miss.append("cut check: " + str(st.get("cut_gate") or "did not run")[:140])
+    _pc = st.get("picture_check") or {}
+    if not _pc.get("verdict"):
+        miss.append("picture check: " + str(_pc.get("error") or "did not run")[:140])
+    _cr = str(st.get("credits", ""))
+    if not _cr or _cr.startswith(("not run", "CREDITS FAILED")):
+        miss.append("end credits: " + (_cr or "did not run")[:140])
+    try:
+        def _d(sel):
+            r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", sel, "-show_entries",
+                                "stream=duration", "-of", "csv=p=0", str(out)],
+                               capture_output=True, text=True, timeout=120)
+            return float((r.stdout.strip().splitlines() or ["0"])[0] or 0)
+        _dv, _da = _d("v:0"), _d("a:0")
+        if _dv <= 0 or _da <= 0:
+            miss.append("file: no %s stream" % ("picture" if _dv <= 0 else "sound"))
+        elif abs(_dv - _da) > 1.0:
+            miss.append("file: picture %.1f s but sound %.1f s" % (_dv, _da))
+    except Exception as _fx:
+        miss.append("file: could not be measured (%s)" % type(_fx).__name__)
+    return miss
 
 
 def _audio_len_s(video) -> float:
@@ -956,6 +1095,7 @@ def _parse_frame_audit(text: str) -> dict:
         if s.startswith("FRAME_AUDIT"):
             out["verdict"] = "green" if s.endswith("GREEN") else "red"
     return out
+SPEED_RETRY_MIN = 0.010   # a consistent speed difference this big is worth a re-analysis
 TG_FIT_BYTES = int(1.95 * 1024 ** 3)      # same cap as bot.TG_LIMIT
 DLG_SCRIPT = "/opt/dubsync2/dialogue_layer.py"
 
@@ -1588,8 +1728,17 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
     _passed = st.get("gate") == "passed"
     _nblock = len(st.get("gate_notes") or [])
     _head = "dub-sync complete" if _passed else "⚠️ dub-sync — NEEDS REVIEW (NOT final)"
+    _miss = st.get("contract_missing") or []
+    if _miss:
+        _head = "⛔ dub-sync — INCOMPLETE (see the first lines)"
     lines = [f"🎬 **{title}** — {_head}",
              f"`{int(dur_s//3600)}h {int(dur_s%3600//60):02d}m` · {size_b/1e9:.2f} GB"]
+    if _miss:
+        lines.append(f"⛔ **{len(_miss)} step(s) did not finish** (each was tried twice):")
+        for _x in _miss[:6]:
+            lines.append("   · " + _x)
+    for _h in (st.get("contract_healed") or [])[:4]:
+        lines.append("🩹 self-repaired: " + _h)
     if not _passed:
         _bs = "s" if _nblock != 1 else ""
         lines.append(f"⛔ **Integrity gate FAILED** — {_nblock} blocker{_bs}. Delivered "
