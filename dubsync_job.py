@@ -808,72 +808,75 @@ async def run_dubsync(
     # ---- AUDIO: the dub for talking, the HD master for music it really has --
     # Without this the delivered film carries the dub track for 100% of its
     # runtime and none of the HD master's fight/music audio.
-    try:
-        _pr = on_progress("🎚 Building audio (dub dialogue + HD music)", 88.0)
-        if asyncio.iscoroutine(_pr):
-            await _pr
-        _sa_out = OUT_DIR / f"{title}_v8.mp4"
-        _sa = await asyncio.create_subprocess_exec(
-            DLG_PY, "-u", SWITCH_AUDIO, "--work", str(_post_work),
-            "--video", str(out), "--out", str(_sa_out), "--abitrate", "320k",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        if register:
-            register(_sa)
-        # Read switch_audio's per-piece lines as they come, so the panel moves
-        # during the longest silent step of a feature film.
-        import re as _re_a
-        import time as _time_a
-        _pat_scan = _re_a.compile(r"(dub|hd): [0-9.]+-([0-9.]+)s scanned")
-        _lines, _pieces, _last = [], 0, 0.0
+    if AUDIO_MODE != "switch":
+        stats["audio"] = "dub audio -- the Somali track for the whole film (John: no HD music)"
+    else:
         try:
-            _total = float(_audio_len_s(out)) if "_audio_len_s" in globals() else 0.0
-        except Exception:
-            _total = 0.0
-        _expect = max(2, int(2 * (_total // 300.0 + 1))) if _total > 0 else 0
-        while True:
-            _raw = await _sa.stdout.readline()
-            if not _raw:
-                break
-            _ln = _raw.decode("utf-8", "replace")
-            _lines.append(_ln)
-            if _pat_scan.search(_ln):
-                _pieces += 1
-                if _expect and _time_a.time() - _last >= 20:
-                    _last = _time_a.time()
-                    try:
-                        _pr2 = on_progress("🎚 Building audio -- listening %d/%d"
-                                           % (min(_pieces, _expect), _expect),
-                                           88.0 + 7.0 * min(1.0, _pieces / _expect))
-                        if asyncio.iscoroutine(_pr2):
-                            await _pr2
-                    except Exception:
-                        pass
-        await _sa.wait()
-        _txt = "".join(_lines)
-        for _ln in _txt.splitlines():
-            if "HD passages:" in _ln or "DUB carries" in _ln or "intro:" in _ln:
-                stats.setdefault("audio_notes", []).append(_ln.strip())
-        if _sa_out.exists() and _sa_out.stat().st_size > 0:
-            out = _sa_out
-            stats["audio"] = "dub dialogue + HD master music"
-        else:
-            # keep the reason: Pushpa 2 shipped "dub only" and the cause was thrown away
-            _why = ""
+            _pr = on_progress("🎚 Building audio (dub dialogue + HD music)", 88.0)
+            if asyncio.iscoroutine(_pr):
+                await _pr
+            _sa_out = OUT_DIR / f"{title}_v8.mp4"
+            _sa = await asyncio.create_subprocess_exec(
+                DLG_PY, "-u", SWITCH_AUDIO, "--work", str(_post_work),
+                "--video", str(out), "--out", str(_sa_out), "--abitrate", "320k",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            if register:
+                register(_sa)
+            # Read switch_audio's per-piece lines as they come, so the panel moves
+            # during the longest silent step of a feature film.
+            import re as _re_a
+            import time as _time_a
+            _pat_scan = _re_a.compile(r"(dub|hd): [0-9.]+-([0-9.]+)s scanned")
+            _lines, _pieces, _last = [], 0, 0.0
             try:
-                (OUT_DIR / f"{title}_switch_audio.log").write_text(_txt)
-                _tail = [x.strip() for x in _txt.splitlines() if x.strip()]
-                _why = _tail[-1][:160] if _tail else ""
+                _total = float(_audio_len_s(out)) if "_audio_len_s" in globals() else 0.0
             except Exception:
-                pass
-            stats["audio"] = ("dub only (switch_audio produced no file"
-                              + (f": {_why}" if _why else "") + ")")
-    except Exception as _aexc:
-        stats["audio"] = "dub only (%s)" % type(_aexc).__name__
+                _total = 0.0
+            _expect = max(2, int(2 * (_total // 300.0 + 1))) if _total > 0 else 0
+            while True:
+                _raw = await _sa.stdout.readline()
+                if not _raw:
+                    break
+                _ln = _raw.decode("utf-8", "replace")
+                _lines.append(_ln)
+                if _pat_scan.search(_ln):
+                    _pieces += 1
+                    if _expect and _time_a.time() - _last >= 20:
+                        _last = _time_a.time()
+                        try:
+                            _pr2 = on_progress("🎚 Building audio -- listening %d/%d"
+                                               % (min(_pieces, _expect), _expect),
+                                               88.0 + 7.0 * min(1.0, _pieces / _expect))
+                            if asyncio.iscoroutine(_pr2):
+                                await _pr2
+                        except Exception:
+                            pass
+            await _sa.wait()
+            _txt = "".join(_lines)
+            for _ln in _txt.splitlines():
+                if "HD passages:" in _ln or "DUB carries" in _ln or "intro:" in _ln:
+                    stats.setdefault("audio_notes", []).append(_ln.strip())
+            if _sa_out.exists() and _sa_out.stat().st_size > 0:
+                out = _sa_out
+                stats["audio"] = "dub dialogue + HD master music"
+            else:
+                # keep the reason: Pushpa 2 shipped "dub only" and the cause was thrown away
+                _why = ""
+                try:
+                    (OUT_DIR / f"{title}_switch_audio.log").write_text(_txt)
+                    _tail = [x.strip() for x in _txt.splitlines() if x.strip()]
+                    _why = _tail[-1][:160] if _tail else ""
+                except Exception:
+                    pass
+                stats["audio"] = ("dub only (switch_audio produced no file"
+                                  + (f": {_why}" if _why else "") + ")")
+        except Exception as _aexc:
+            stats["audio"] = "dub only (%s)" % type(_aexc).__name__
 
     if _cancelled():
         return DubResult(False, None, "cancelled", stats)
     # ---- CONTRACT: the audio step is never silently skipped -- one more try ----
-    if not str(stats.get("audio", "")).startswith("dub dialogue"):
+    if AUDIO_MODE == "switch" and not str(stats.get("audio", "")).startswith("dub dialogue"):
         stats["audio_first_try"] = stats.get("audio")
         if not (_post_work / "provenance.json").exists():
             stats["audio_retry"] = "not retried: no provenance.json in work/%s" % _post_work.name
@@ -1179,7 +1182,7 @@ def _contract_missing(st: dict, out) -> list:
     """What a finished conform delivery must have, checked after the retries. Each missing
     item is one short line for the top of the report. Facts about the FILE come from the file."""
     miss = []
-    if not str(st.get("audio", "")).startswith("dub dialogue"):
+    if not str(st.get("audio", "")).startswith(("dub dialogue", "dub audio")):
         miss.append("sound mix (dub talk + HD music): " + str(st.get("audio_retry") or st.get("audio")
                                                             or "did not run")[:140])
     if not st.get("dialogue_gate"):
@@ -1225,6 +1228,9 @@ def _audio_len_s(video) -> float:
 
 
 SWITCH_AUDIO = "/opt/dubsync2/switch_audio.py"
+# John 2026-09-29: "I don't care music" -- the dub's sound for the whole film (no ~1 h listening step,
+# no switch jumps, no HD voice in a gap). "switch" = the old dub-talk / HD-music switch.
+AUDIO_MODE = "dub"
 CUT_AUDIT = "/opt/dubsync2/cut_audit.py"
 APPEND_CREDITS = "/opt/dubsync2/append_credits.py"
 FRAME_AUDIT = "/opt/dubsync2/tools/frame_audit.py"

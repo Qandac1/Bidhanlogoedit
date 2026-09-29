@@ -1,5 +1,16 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-09-29 (night) — bot12 LIVE: the Somali sound for the whole film
+
+- AUDIO_MODE = "dub" (John: "I don't care music"): the slow "Building audio -- listening" step
+  (switch_audio, ~1 h per film) is skipped; no switch jumps, no HD voice in a gap. "switch" brings
+  the old dub-talk / HD-music step back. 9 suites pass (test_bot_dubaudio new; test_bot_contract runs
+  its switch scenarios in switch mode).
+- Bheemaa (no logo) made by bot11 on its own: opening from the health-warning card (FANPROJ intro +
+  narrator cut), wrong clip 2:24:36 self-repaired, 100 % HD, credits kept; checked by eye; Saved
+  60877 (report) + 60878 (MEGA link). Known: 1:38:52-1:39:08 up to 1.3 s behind (1.4 s Somali-only
+  shot, no voice -- cutting it would jump the music), 1:20:41 Somali version longer (limit).
+
 ## 2026-09-29 (night) — bot11 LIVE (6ea1b96): the film start by John's rule
 
 - The opening step now runs BEFORE the voice restore: HD logo intro, then the film from the first
