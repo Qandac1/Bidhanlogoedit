@@ -122,6 +122,10 @@ def load(d, name):
     for k in ("switch_audio", "restore_head", "opening_restore", "cut_audit", "frame_audit", "append_credits"):
         setattr(m, k.upper(), str(T / (k + ".py")))
     m._quality_report = lambda title: {}
+    if hasattr(m, "AUDIO_MODE"):
+        # these scenarios test the dub-talk / HD-music switch step (its retry, failures, cancel); the
+        # bot12 default (the dub's sound, no switch) is proven by test_bot_dubaudio.py
+        m.AUDIO_MODE = "switch"
     return m
 
 
