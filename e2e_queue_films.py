@@ -13,7 +13,8 @@ NOT the "mids" in /app/data/dub_queue.json -- those are the BOT's numbering of t
 chat; forwarding them from John's side forwards unrelated old messages (2026-09-27).
 Full films: the bot reads both files before the panel appears -- waits up to 10 min.
 
-Usage: /opt/media-os/venv/bin/python e2e_queue_films.py [--no-brand] HD,DUB [HD,DUB ...]
+Usage: /opt/media-os/venv/bin/python e2e_queue_films.py [--no-brand] [--from-saved] HD,DUB [HD,DUB ...]
+  --from-saved: the ids are in John's Saved Messages (forwarded from there to the bot).
   --no-brand: press "Branding" on each panel until it reads "Branding: OFF" (John 2026-09-29: a clean
   film, no logo); Start is NEVER pressed unless the panel shows OFF.
 Prints QUEUED OK when every film started or was queued.
@@ -71,11 +72,11 @@ async def main(pairs):
         prompt = None
         for n, (hd, dub) in enumerate(pairs, 1):
             for mid in (hd, dub):
-                src = await app.get_messages(BOT, mid)
+                src = await app.get_messages(SRC, mid)
                 if not (src and (src.video or src.document)):
-                    print("film %d: message %d is not a video/file in the bot chat -- stop" % (n, mid))
+                    print("film %d: message %d is not a video/file in %s -- stop" % (n, mid, SRC))
                     return
-                await app.forward_messages(BOT, BOT, mid)
+                await app.forward_messages(BOT, SRC, mid)
                 await asyncio.sleep(6)
             panel = await newest(app, mark, lambda m: "dub:start" in buttons(m), tries=200)
             if panel is None:
@@ -114,5 +115,7 @@ async def main(pairs):
 
 
 NO_BRAND = "--no-brand" in sys.argv
-pairs = [tuple(int(x) for x in a.split(",")) for a in sys.argv[1:] if a != "--no-brand"]
+# --from-saved: the pair ids are in John's Saved Messages (new films he sends himself), not the bot chat
+SRC = "me" if "--from-saved" in sys.argv else BOT
+pairs = [tuple(int(x) for x in a.split(",")) for a in sys.argv[1:] if not a.startswith("--")]
 asyncio.run(main(pairs))
