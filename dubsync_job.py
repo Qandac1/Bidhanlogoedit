@@ -1053,6 +1053,27 @@ async def run_dubsync(
     except Exception as _faexc:
         stats["picture_check"] = {"error": type(_faexc).__name__}
 
+    # ---- LIP SYNC: the Somali voice on the lips, MEASURED on the film (2026-09-29: two engine bugs
+    # put it 0.3-1.4 s off in 7 films and no check looked at voice vs lips). Read-only, fail-open:
+    # five places spread over the film; a place without a clear voice (music, silence) is skipped.
+    try:
+        _ld = _audio_len_s(out)
+        _at = ",".join("%.0f" % (_ld * _f) for _f in (0.1, 0.3, 0.5, 0.7, 0.9))
+        _av = await asyncio.create_subprocess_exec(
+            DLG_PY, AV_SYNC, title, str(out), "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
+            "--at", _at, "--search", "3",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        _avt = (await asyncio.wait_for(_av.communicate(), timeout=1200))[0].decode("utf-8", "replace")
+        await _av.wait()
+        _m = re.search(r"AV_SYNC ([+-]?[0-9.]+|none) (\d+)", _avt)
+        if _m:
+            stats["lip_sync"] = {"median": None if _m.group(1) == "none" else float(_m.group(1)),
+                                 "points": int(_m.group(2))}
+        else:
+            stats["lip_sync"] = {"error": (_avt.strip().splitlines() or ["no output"])[-1][:120]}
+    except Exception as _avx:
+        stats["lip_sync"] = {"error": type(_avx).__name__}
+
     # Release gate. A failure here is not a crash — the movie exists, it just
     # could not be proven clean, and the caller should say so rather than
     # silently presenting it as finished.
@@ -1197,6 +1218,17 @@ def _contract_missing(st: dict, out) -> list:
     _pc = st.get("picture_check") or {}
     if not _pc.get("verdict"):
         miss.append("picture check: " + str(_pc.get("error") or "did not run")[:140])
+    # hard rules (John 2026-09-29): not complete when Somali-voiced FILM was cut (its frames are in the
+    # HD) or when the voice is MEASURED off the lips
+    _dg = str(st.get("dialogue_gate", ""))
+    if _dg.endswith("RED") or " RED " in _dg:
+        _red = [x for x in (st.get("dialogue_lines") or []) if "cut by mistake" in x]
+        miss.append("dialogue: film with Somali voice was cut by mistake -- "
+                    + (_red[0].replace("voice dub ", "dub ")[:140] if _red else "see the dialogue lines"))
+    _ls = st.get("lip_sync") or {}
+    if _ls.get("median") is not None and _ls.get("points", 0) >= 2 and abs(_ls["median"]) > 0.10:
+        miss.append("lip sync: the Somali voice is %.2f s %s the lips (measured at %d places)"
+                    % (abs(_ls["median"]), "BEFORE" if _ls["median"] > 0 else "AFTER", _ls["points"]))
     _cr = str(st.get("credits", ""))
     if not _cr or _cr.startswith(("not run", "CREDITS FAILED")):
         miss.append("end credits: " + (_cr or "did not run")[:140])
@@ -1234,6 +1266,8 @@ AUDIO_MODE = "dub"
 CUT_AUDIT = "/opt/dubsync2/cut_audit.py"
 APPEND_CREDITS = "/opt/dubsync2/append_credits.py"
 FRAME_AUDIT = "/opt/dubsync2/tools/frame_audit.py"
+# the Somali voice vs the lips, measured on the finished film (bot13, 2026-09-29)
+AV_SYNC = "/opt/dubsync2/tools/av_sync.py"
 RESTORE_HEAD = "/opt/dubsync2/tools/restore_head.py"
 OPENING_RESTORE = "/opt/dubsync2/tools/opening_restore.py"
 AUTO_REPAIR = "/opt/dubsync2/tools/auto_repair.py"
@@ -1991,6 +2025,16 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
                     lines.append(f"   · +{len(_pc['spots']) - 8} more (frame_audit.json)")
         elif _pc.get("error"):
             lines.append(f"⚠️ picture check not run ({_pc['error']})")
+        _ls = st.get("lip_sync") or {}
+        if _ls.get("median") is not None and _ls.get("points", 0) >= 2:
+            if abs(_ls["median"]) <= 0.10:
+                lines.append("👄 lip sync: the Somali voice is on the lips (measured at %d places, %+.2f s)"
+                             % (_ls["points"], _ls["median"]))
+            else:
+                lines.append("⛔ lip sync: the Somali voice is %.2f s %s the lips (measured at %d places)"
+                             % (abs(_ls["median"]), "BEFORE" if _ls["median"] > 0 else "AFTER", _ls["points"]))
+        elif _ls:
+            lines.append("ℹ️ lip sync: not measured (%s)" % (_ls.get("error") or "no clear voice at the places checked"))
         # The ONE thing the engine must not decide alone. On Spider-Noir the
         # auto-detector found 0:37 while the real intro ended at 1:53, because
         # the dub had moved the title sequence to the front. Cutting on a weak
