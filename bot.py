@@ -114,6 +114,7 @@ _batch_panel: dict[int, Message] = {}     # uid -> the batch panel message
 _batch_cancel: dict[int, bool] = {}       # uid -> stop-the-whole-batch flag
 _dubsel: dict[int, dict] = {}             # uid -> pending dub-sync selection
 _dubflow: dict[int, dict] = {}            # uid -> guided dub-sync intake
+_dubchoice: dict = {}                     # uid -> a file waiting for "next dub movie or brand it?"
 _work_seq = 0
 
 
@@ -1331,6 +1332,31 @@ async def _loginpremium(_, m: Message):
                   "(Send /cancel to stop.)")
 
 
+def _kill_procs_in(path: str) -> bool:
+    """Kill every process working inside this job's own folder. A step that runs ffmpeg in a THREAD
+    (the banner scan) registers no process, so /cancel said "cancelled" while the scan went on
+    (2026-09-29). Matches the folder with a trailing slash, never this bot itself."""
+    import signal
+    if not path:
+        return False
+    key, me, hit = path.rstrip("/") + "/", os.getpid(), False
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == me:
+            continue
+        try:
+            with open("/proc/%s/cmdline" % d, "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if key in cmd:
+            try:
+                os.kill(int(d), signal.SIGKILL)
+                hit = True
+            except OSError:
+                pass
+    return hit
+
+
 async def _cancel_everything(uid: int) -> list:
     """Stop whatever this user has running. Shared by /cancel and the button,
     so the button can no longer claim to cancel while the job keeps going."""
@@ -1338,6 +1364,11 @@ async def _cancel_everything(uid: int) -> list:
     # 0) a batch: stop the whole queue (and the current item below)
     if _dubflow.pop(uid, None) is not None:
         done.append("🎬 dub-sync intake cancelled")
+    _dubchoice.pop(uid, None)
+    # an unstarted dub selection must not outlive a cancel: it drew the next banner panel as
+    # "Ready to dub-sync" (2026-09-29)
+    if _dubsel.pop(uid, None) is not None:
+        done.append("🎬 unstarted dub-sync selection cleared")
 
     if _batch_cancel.get(uid) is not None or _batch.get(uid) or _queue.get(uid):
         _batch_cancel[uid] = True
@@ -1369,6 +1400,9 @@ async def _cancel_everything(uid: int) -> list:
                 killed = True
             except Exception:
                 pass
+        # a step running ffmpeg in a thread registers no process: stop everything in the job's folder
+        if a.get("work") and _kill_procs_in(a["work"]):
+            killed = True
         if killed:
             done.append(f"🛑 {a.get('phase') or 'job'} cancelled")
     # 2) a pending job waiting in the panel (not started yet)
@@ -1953,6 +1987,14 @@ async def _dubflow_take(uid: int, m: Message) -> bool:
     fl = _dubflow.get(uid)
     if not fl:
         return False
+    if fl.get("next") and fl["step"] == "hd" and not fl.get("chosen"):
+        # after a film was started, a file is NOT silently taken as the next dub movie -- John sends
+        # banner videos too (2026-09-29: two banner sends vanished into this intake). Ask, visibly.
+        _dubchoice[uid] = m
+        await m.reply("🎬 **Next dub-sync movie**, or 🎨 **brand this video** (logo / trim / banners)?",
+                      reply_markup=IKM([[IKB("🎬 Next dub-sync movie", "dubflow:asdub"),
+                                         IKB("🎨 Brand this video", "dubflow:asbrand")]]))
+        return True
     name, w, h, _d = _vmeta(m)
     res = f"{w}×{h}" if w and h else "resolution unknown"
     if fl["step"] == "hd":
@@ -2127,8 +2169,12 @@ def _dub_job_stub(uid: int) -> dict | None:
 
 
 async def _refresh_active_panel(cq, uid: int, job: dict) -> None:
-    """Redraw whichever panel is open — dub or branding."""
-    if _dubsel.get(uid):
+    """Redraw whichever panel is open — dub or branding. The dub panel only on the dub panel's OWN
+    message: a leftover dub selection drew a banner job as "Ready to dub-sync" (2026-09-29)."""
+    _sel = _dubsel.get(uid)
+    _pm = (_sel or {}).get("panel")
+    if _sel and (getattr(_pm, "id", None) == getattr(cq.message, "id", -1)
+                 or (_pm is None and not _pending.get(uid))):
         await cq.message.edit(_dub_panel_text(uid), reply_markup=_dub_panel_kb(uid))
     else:
         text, kb = panel(uid, job)
@@ -2353,6 +2399,31 @@ async def _cb(_, cq: CallbackQuery):
         return await cq.message.reply(
             "⚙️ Send **/settings** to view and change logos, caption and quality.")
 
+    if data in ("dubflow:asdub", "dubflow:asbrand"):
+        m0 = _dubchoice.pop(uid, None)
+        if m0 is None:
+            return await cq.answer("That file is gone — send it again.", show_alert=True)
+        await cq.answer()
+        if data == "dubflow:asbrand":
+            _dubflow.pop(uid, None)
+            try:
+                await cq.message.edit("🎨 Branding this video — your dub-sync queue is untouched.")
+            except Exception:
+                pass
+            _enqueue(uid, m0)
+            return
+        fl = _dubflow.get(uid)
+        if fl is None:
+            try:
+                await cq.message.edit("⚠️ The dub-sync intake was closed — send /dub to add a movie.")
+            except Exception:
+                pass
+            return
+        fl["chosen"] = True
+        fl["prompt"] = cq.message              # the visible, recent message carries the next steps
+        await _dubflow_take(uid, m0)
+        return
+
     if data == "dubflow:cancel":
         _dubflow.pop(uid, None)
         await cq.message.edit("❌ Dub-sync cancelled.")
@@ -2424,6 +2495,7 @@ async def _cb(_, cq: CallbackQuery):
                     pass
                 await _dubflow_start(uid, cq.message, DUB_NEXT_HD,
                                      IKM([[IKB("✅ Done", "dubflow:done"), IKB("📋 Queue", "dq:show")]]))
+                _dubflow[uid]["next"] = True        # files here are ASKED about, never taken silently
                 return
             await cq.answer("Starting…")
             try:
@@ -3170,6 +3242,7 @@ async def _render_job(uid: int, job: dict, status: Message):
                         except Exception:
                             pass
                         await asyncio.sleep(5)
+                _act(uid).update(work=work, phase="Banner scan")   # so /cancel can stop it (bot14)
                 sp = asyncio.create_task(scan_poll())
                 try:
                     events = await asyncio.to_thread(
