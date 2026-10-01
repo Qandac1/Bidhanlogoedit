@@ -2149,6 +2149,9 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
                          "with their music" % (_cs // 60, _cs % 60))
         elif str(st.get("credits", "")).startswith("CREDITS FAILED"):
             lines.append("⚠️ end credits not added — %s" % st["credits"][16:90])
+        elif str(st.get("credits", "")).startswith("SKIP") and "the dub kept its ending" in str(st["credits"]):
+            lines.append("🎬 end credits kept: the Somali copy runs to the film's own end (its credits are in the "
+                         "film)")
         elif str(st.get("credits", "")).startswith("SKIP"):
             lines.append("⚠️ end credits not added — %s" % st["credits"][5:150].strip())
         if q.get("offset_ok") is not None:
