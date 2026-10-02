@@ -750,6 +750,56 @@ def _effective_bitrate(c: dict, dur: float) -> tuple[int, str]:
     return base, f"{base}k"
 
 
+# ---- above 1080p (bot20, John 2026-10-02: a 3840x2160 source came out 1920x1080) ----------------------------
+UHD_W, UHD_H = 3840, 2160
+HQ_SHORT_S = 20 * 60            # short videos / trailers: a source above 1080p keeps its size (hq_short)
+BASE_PIX = 1920 * 1080          # the bitrate setting is the 1080p value
+
+
+def _fit_box(w: int, h: int, bw: int, bh: int) -> tuple[int, int]:
+    """w x h scaled DOWN (never up) to fit inside bw x bh, even sizes."""
+    if w <= 0 or h <= 0:
+        return bw, bh
+    k = min(1.0, bw / w, bh / h)
+    return int(w * k) // 2 * 2, int(h * k) // 2 * 2
+
+
+def _out_size(c: dict, src_w: int, src_h: int, dur: float) -> tuple[int, int, str]:
+    """(width, height, note) of the render. A source at or below 1080p: exactly the old rule."""
+    big = src_w > 1920 or src_h > 1080
+    if c["width"] == 0:
+        return src_w, src_h, ""
+    if c["width"] == -1:                                      # "4K": the source's own size up to 3840x2160
+        if big:
+            w, h = _fit_box(src_w, src_h, UHD_W, UHD_H)
+            return w, h, " (4K: the source's own size)"
+        return 1920, 1080, ""
+    if big and c.get("hq_short", True) and 0 < dur <= HQ_SHORT_S:
+        w, h = _fit_box(src_w, src_h, UHD_W, UHD_H)
+        return w, h, " (short video: kept at its source size)"
+    return c["width"], c["height"], ""
+
+
+def _effective_bitrate_wh(c: dict, dur: float, w: int, h: int) -> tuple[int, str]:
+    """_effective_bitrate for a w x h render: above 1080p the bitrate setting (a 1080p value) grows with the
+    picture, the size target stays a ceiling. At or below 1080p: exactly _effective_bitrate."""
+    if w * h <= BASE_PIX or int(c["bitrate"]) <= 0:
+        return _effective_bitrate(c, dur)
+    base = int(round(int(c["bitrate"]) * (w * h) / BASE_PIX / 100.0)) * 100
+    if c["size_target_gb"] > 0 and dur > 0:
+        cap = bitrate_for_target(dur, int(c["size_target_gb"] * 1024 ** 3), c["audio_k"])
+        if cap < base:
+            return cap, f"{cap}k (capped → {c['size_target_gb']:g} GB)"
+    return base, f"{base}k ({int(c['bitrate'])}k at 1080p, scaled for {w}×{h})"
+
+
+def _res_label(c: dict) -> str:
+    """The resolution setting as shown before bot20, plus "4K" for the new choice."""
+    if c["width"] == -1:
+        return "4K"
+    return "Source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
+
+
 async def _run_quiet(*cmd, timeout: float = 90.0) -> bytes:
     """asyncio subprocess (never the blocking module inside the event loop -- see
     dubsync_job._make_proxy); stdout bytes, b"" on any failure."""
@@ -831,7 +881,8 @@ def _fmt_hms(s: float) -> str:
 def panel(uid: int, job: dict) -> tuple[str, IKM]:
     c = user_cfg(uid)
     dur = job["duration"]
-    vk, br_label = _effective_bitrate(c, dur)
+    _ow, _oh, _onote = _out_size(c, int(job.get("w") or 0), int(job.get("h") or 0), dur)
+    vk, br_label = _effective_bitrate_wh(c, dur, _ow, _oh)
     size = estimate_size_bytes(dur, vk, c["audio_k"])
     if size > TG_LIMIT:
         if _premium_session() and size <= PREMIUM_LIMIT:
@@ -842,7 +893,9 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
             warn = "  ⚠️ over 2GB (set /loginpremium or /megalogin)"
     else:
         warn = ""
-    res = "Source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
+    res = _res_label(c)
+    if _onote or c["width"] == -1:
+        res = f"{_ow}×{_oh}{_onote}"
     if c.get("scroll_times"):
         times = "@ " + ", ".join(f"{x:g}m" for x in c["scroll_times"])
     else:
@@ -938,9 +991,12 @@ def submenu(which: str, uid: int, job: dict) -> IKM:
                      f"s:size_target_gb:{v}") for lbl, v in opts]]
         return IKM(rows + [_back_row()])
     if which == "res":
-        opts = [("1920×1080", "1920x1080"), ("1280×720", "1280x720"), ("Source", "source")]
-        cur = "source" if c["width"] == 0 else f"{c['width']}x{c['height']}"
+        opts = [("4K", "4k"), ("1920×1080", "1920x1080"), ("1280×720", "1280x720"), ("Source", "source")]
+        cur = "4k" if c["width"] == -1 else ("source" if c["width"] == 0 else f"{c['width']}x{c['height']}")
         rows = [[IKB(f"{'✅' if cur==v else ''}{lbl}", f"s:res:{v}") for lbl, v in opts]]
+        hq = c.get("hq_short", True)
+        rows.append([IKB(("✅ " if hq else "❌ ") + "Short videos & trailers above 1080p keep 4K",
+                         f"s:hq_short:{0 if hq else 1}")])
         return IKM(rows + [_back_row()])
     if which == "fps":
         rows = [[IKB(f"{'✅' if c['fps']==f else ''}{f}", f"s:fps:{f}")
@@ -1267,7 +1323,7 @@ async def _save_preset(_, m: Message):
     c = user_cfg(m.from_user.id)
     await m.reply(
         f"✅ Saved preset **{name}** with your current settings "
-        f"(cover {c['cover_mode']}, {c['width']}×{c['height']}, logo start "
+        f"(cover {c['cover_mode']}, {_res_label(c)}, logo start "
         f"{c.get('logo_start_min',0):g}m).\n\n"
         f"Now for any movie: **paste the link → tap 🎬 {name}** → done.")
 
@@ -1728,7 +1784,7 @@ async def _intake_single(uid: int, m: Message) -> None:
 
 def _batch_panel_text(uid: int, n: int) -> str:
     c = user_cfg(uid)
-    res = "Source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
+    res = _res_label(c)
     return (f"📦 **{n} videos queued**\n"
             f"🟥 Cover: {c['cover_mode']}  •  🖼 {res}  •  🎞 {c['fps']}fps\n"
             f"📝 `{c['scroll_text']}`\n\n"
@@ -2087,13 +2143,16 @@ def _dub_panel_text(uid: int) -> str:
         brand_line = f"🏷 Branding: {bits}{cap}  _(same encode)_"
     else:
         brand_line = "🏷 Branding: **off** — conform only"
-    res = "source" if c["width"] == 0 else f"{c['width']}×{c['height']}"
+    res = "source" if c["width"] == 0 else ("4K" if c["width"] == -1 else f"{c['width']}×{c['height']}")
 
     # ---- what comes out -------------------------------------------------
     # Output length tracks the DUB (that is the edit being conformed to), less
     # its own intro/promo, which is only measurable after analysis.
     out_dur = ddur or hdur or 0.0
-    vk, br_label = _effective_bitrate(c, out_dur) if out_dur else (0, "—")
+    _dw, _dh, _dnote = _out_size(c, int(hw or 0), int(hh or 0), out_dur)
+    if c["width"] not in (0, -1) and not _dnote:
+        _dw, _dh = c["width"], c["height"]
+    vk, br_label = _effective_bitrate_wh(c, out_dur, _dw, _dh) if out_dur else (0, "—")
     vk, fit_note = _fit_bitrate(vk, out_dur, c["audio_k"])
     br_label += fit_note
     est = estimate_size_bytes(out_dur, vk, c["audio_k"]) if out_dur else 0
@@ -2107,6 +2166,8 @@ def _dub_panel_text(uid: int) -> str:
     else:
         deliver = "→ sent straight to Telegram"
     out_res = f"{hw}×{hh}" if c["width"] == 0 and hw else res
+    if (_dnote or c["width"] == -1) and hw:
+        res = out_res = f"{_dw}×{_dh}{_dnote}"
     result = (
         f"\n🎞 **After editing** _(estimate)_\n"
         f"     ~{_fmt_hms(out_dur)} · {out_res} · ~{human_size(est)}\n"
@@ -2552,9 +2613,15 @@ async def _cb(_, cq: CallbackQuery):
             set_user(uid, **{key: float(val)})
             await cq.message.edit_reply_markup(submenu("starts", uid, job))
             return await cq.answer("✓")
+        elif key == "hq_short":
+            set_user(uid, hq_short=bool(int(val)))
+            await cq.message.edit_reply_markup(submenu("res", uid, job))
+            return await cq.answer("✓")
         elif key == "res":
             if val == "source":
                 set_user(uid, width=0, height=0)
+            elif val == "4k":
+                set_user(uid, width=-1, height=-1)
             else:
                 w, h = val.split("x")
                 set_user(uid, width=int(w), height=int(h))
@@ -2818,6 +2885,11 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         c = user_cfg(uid)
         ow = hd_job["w"] if c["width"] == 0 else c["width"]
         oh = hd_job["h"] if c["height"] == 0 else c["height"]
+        # above 1080p (bot20): "4K", or a short dub (trailer) whose HD is above 1080p
+        _hq = _out_size(c, int(hd_job.get("w") or 0), int(hd_job.get("h") or 0),
+                        float(dub_job.get("duration") or 0.0))
+        if c["width"] == -1 or _hq[2]:
+            ow, oh = _hq[0], _hq[1]
 
         # Pre-flight: catch an unusable pairing before spending 30-90+
         # minutes discovering it near the end. Both files need an audio
@@ -2895,7 +2967,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                           "get up to 4 GB again."))
         except Exception:
             log.exception("premium probe before render failed")
-        _vk, _ = _effective_bitrate(c, _dur)
+        _vk, _ = _effective_bitrate_wh(c, _dur, ow, oh)
         _vk, _ = _fit_bitrate(_vk, _dur, c["audio_k"])
         res = await dubsync_job.run_dubsync(
             hd, dub, title, (_brand_payload(uid) if brand else None),
@@ -3320,7 +3392,8 @@ async def _render_job(uid: int, job: dict, status: Message):
             else:
                 await status.edit("⏭ Cover off — skipping scan, going straight to render.")
 
-            vk, _ = _effective_bitrate(c, dur)
+            _bw, _bh, _ = _out_size(c, int(job.get("w") or 0), int(job.get("h") or 0), dur)
+            vk, _ = _effective_bitrate_wh(c, dur, _bw, _bh)
             logos = []
             sc = c["logo_scale"]
             if c["streamnxt_on"]:
@@ -3370,8 +3443,8 @@ async def _render_job(uid: int, job: dict, status: Message):
                 logo_end=_le,
                 cover_end=_ce,
                 text_end=_te,
-                width=(job["w"] if c["width"] == 0 else c["width"]),
-                height=(job["h"] if c["height"] == 0 else c["height"]),
+                width=_bw,
+                height=_bh,
                 fps=c["fps"], video_bitrate_k=vk, audio_bitrate_k=c["audio_k"],
                 preset=settings.x264_preset,
             )
