@@ -518,6 +518,13 @@ async def run_dubsync(
     }
 
     stats: dict = {}
+    # bot21: never start a film into a full disk (it would render for hours and fail in the last steps)
+    _sp_ok, _sp_note = await _ensure_space(_job_need_gb(hd, dub))
+    if not _sp_ok:
+        return DubResult(False, None, "💽 " + _sp_note + ". Nothing was rendered -- the film is not lost: "
+                         "send it again when space is back (tell Claude: the disk is full).", stats)
+    if _sp_note:
+        stats["space_note"] = _sp_note
     done_weight = 0.0
     total_weight = sum(w for _, _, w in STAGES)   # "repair" counted once
 
@@ -815,6 +822,7 @@ async def run_dubsync(
             _pr = on_progress("🎚 Building audio (dub dialogue + HD music)", 88.0)
             if asyncio.iscoroutine(_pr):
                 await _pr
+            await _ensure_space(_step_need_gb(out))                    # bot21
             _sa_out = OUT_DIR / f"{title}_v8.mp4"
             _sa = await asyncio.create_subprocess_exec(
                 DLG_PY, "-u", SWITCH_AUDIO, "--work", str(_post_work),
@@ -913,42 +921,51 @@ async def run_dubsync(
     # stretch extrapolated back to the end of the HD intro; dub seconds there are film unless
     # proven otherwise (tools/opening_gate.py). Proven film missing at the start is put back (HD
     # picture + the dub's sound, after the HD intro); "unsure" only -> reported, nothing changed.
-    try:
-        if _cancelled():
-            return DubResult(False, None, "cancelled", stats)
-        _og_out = OUT_DIR / f"{title}_opening.mp4"
-        _og = await asyncio.create_subprocess_exec(
-            DLG_PY, OPENING_RESTORE, title, str(out), str(_og_out),
-            f"{int(bitrate_k)}k" if bitrate_k else "2000k",
-            "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        if register:
-            register(_og)
-        _ogt = (await asyncio.wait_for(_og.communicate(), timeout=3600))[0].decode("utf-8", "replace")
-        await _og.wait()
-        _ol = [x.strip() for x in _ogt.splitlines() if x.strip()]
-        _of = [x for x in _ol if x.startswith("OPENING_RESTORE")]
-        _ogg = [x for x in _ol if x.startswith("OPENING_GATE")]
-        _ogn = [x for x in _ol if x.startswith("OPENING_NOTE ")]
-        if _ogn:
-            stats["opening_note"] = _ogn[-1][len("OPENING_NOTE "):][:260]
-        if _ogg:
-            stats["opening_gate"] = _ogg[-1][:160]
-        if _of and _of[-1].startswith("OPENING_RESTORE DONE") and _og_out.exists()                 and _og_out.stat().st_size > 0:
-            out.unlink(missing_ok=True)
-            _og_out.rename(out)
-            stats["opening_restored_s"] = float(_of[-1].split()[-1])
-            if stats.get("expected_duration_s"):      # the film is longer by the opening put back (bot17)
-                stats["expected_duration_s"] = float(stats["expected_duration_s"]) + stats["opening_restored_s"]
-        elif _of and _of[-1].startswith("OPENING_RESTORE REPORT"):
-            stats["opening_report"] = _of[-1][len("OPENING_RESTORE REPORT"):].strip()[:200]
-        elif _of and _of[-1].startswith("OPENING_RESTORE NOT NEEDED"):
-            pass
-        else:
-            stats["opening_restore"] = (_of[-1] if _of else "no result: " + (_ol[-1] if _ol else "no output"))[:200]
-            _og_out.unlink(missing_ok=True)
-    except Exception as _ogx:
-        stats["opening_restore"] = "not run (%s)" % type(_ogx).__name__
+    for _og_try in (1, 2):
+        await _ensure_space(_step_need_gb(out))                    # bot21
+        try:
+            if _cancelled():
+                return DubResult(False, None, "cancelled", stats)
+            _og_out = OUT_DIR / f"{title}_opening.mp4"
+            _og = await asyncio.create_subprocess_exec(
+                DLG_PY, OPENING_RESTORE, title, str(out), str(_og_out),
+                f"{int(bitrate_k)}k" if bitrate_k else "2000k",
+                "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            if register:
+                register(_og)
+            _ogt = (await asyncio.wait_for(_og.communicate(), timeout=3600))[0].decode("utf-8", "replace")
+            await _og.wait()
+            _ol = [x.strip() for x in _ogt.splitlines() if x.strip()]
+            _of = [x for x in _ol if x.startswith("OPENING_RESTORE")]
+            _ogg = [x for x in _ol if x.startswith("OPENING_GATE")]
+            _ogn = [x for x in _ol if x.startswith("OPENING_NOTE ")]
+            if _ogn:
+                stats["opening_note"] = _ogn[-1][len("OPENING_NOTE "):][:260]
+            if _ogg:
+                stats["opening_gate"] = _ogg[-1][:160]
+            if _of and _of[-1].startswith("OPENING_RESTORE DONE") and _og_out.exists()                 and _og_out.stat().st_size > 0:
+                out.unlink(missing_ok=True)
+                _og_out.rename(out)
+                stats["opening_restored_s"] = float(_of[-1].split()[-1])
+                if stats.get("expected_duration_s"):      # the film is longer by the opening put back (bot17)
+                    stats["expected_duration_s"] = float(stats["expected_duration_s"]) + stats["opening_restored_s"]
+            elif _of and _of[-1].startswith("OPENING_RESTORE REPORT"):
+                stats["opening_report"] = _of[-1][len("OPENING_RESTORE REPORT"):].strip()[:200]
+            elif _of and _of[-1].startswith("OPENING_RESTORE NOT NEEDED"):
+                pass
+            else:
+                stats["opening_restore"] = (_of[-1] if _of else "no result: " + (_ol[-1] if _ol else "no output"))[:200]
+                _og_out.unlink(missing_ok=True)
+        except Exception as _ogx:
+            stats["opening_restore"] = "not run (%s)" % type(_ogx).__name__
+        # bot21: died on a full disk -> clear space and run this step once more
+        if _og_try == 1 and _is_enospc(stats.get('opening_restore')):
+            if (await _ensure_space(_step_need_gb(out)))[0]:
+                stats.pop('opening_restore', None)
+                continue
+            stats['opening_restore'] = 'disk full, %.0f GB free -- %s' % (_free_gb(), stats['opening_restore'])
+        break
 
     # ---- THE END: the film's last scene with its Somali voice (John 2026-09-30) -----
     # A channel can cover the film's last scene with its own credits box while the Somali voice goes on
@@ -958,6 +975,7 @@ async def run_dubsync(
     try:
         if _cancelled():
             return DubResult(False, None, "cancelled", stats)
+        await _ensure_space(_step_need_gb(out))                        # bot21
         _tl_out = OUT_DIR / f"{title}_tail.mp4"
         _tl = await asyncio.create_subprocess_exec(
             DLG_PY, TAIL_RESTORE, title, str(out), str(_tl_out),
@@ -991,36 +1009,44 @@ async def run_dubsync(
     # HD's own timeline has (Achcham: 16.4 s cut with the channel logo) is put back here --
     # the HD's opening picture, the dub's sound -- and the provenance is rewritten, so the
     # gates below judge the repaired film. Adverts / channel intro stay cut and are listed.
-    try:
-        _rh_out = OUT_DIR / f"{title}_voice.mp4"
-        _rh = await asyncio.create_subprocess_exec(
-            DLG_PY, RESTORE_HEAD, title, str(out), str(_rh_out),
-            f"{int(bitrate_k)}k" if bitrate_k else "2000k",
-            "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        _rht = (await asyncio.wait_for(_rh.communicate(), timeout=5400))[0].decode("utf-8", "replace")
-        await _rh.wait()
-        _rl = [x.strip() for x in _rht.splitlines() if x.strip()]
-        _fin = [x for x in _rl if x.startswith("RESTORE_HEAD")]
-        if _fin and _fin[-1].startswith("RESTORE_HEAD DONE") and _rh_out.exists() \
-                and _rh_out.stat().st_size > 0:
-            out.unlink(missing_ok=True)
-            _rh_out.rename(out)
-            stats["voice_restored_s"] = float(_fin[-1].split()[-1])
-        elif _fin and "FAILED" in _fin[-1]:
-            stats["voice_restore"] = _fin[-1][:200]
-            _rh_out.unlink(missing_ok=True)
-        _pct = [x for x in _rl if "in the output:" in x]
-        if _pct:
-            stats["dialogue_pct"] = _pct[-1].split("in the output:")[-1].strip()
-            _after = _rl[_rl.index(_pct[-1]) + 1:]
-            stats["dialogue_lines"] = [x for x in _after if x.startswith("voice dub")]
-        _v = [x for x in _rl if x.startswith("DIALOGUE_AUDIT")]
-        if _v:
-            stats["dialogue_gate"] = _v[-1]
-    except Exception as _rhx:
-        stats["voice_restore"] = "not run (%s)" % type(_rhx).__name__
-
+    for _rh_try in (1, 2):
+        await _ensure_space(_step_need_gb(out))                    # bot21
+        try:
+            _rh_out = OUT_DIR / f"{title}_voice.mp4"
+            _rh = await asyncio.create_subprocess_exec(
+                DLG_PY, RESTORE_HEAD, title, str(out), str(_rh_out),
+                f"{int(bitrate_k)}k" if bitrate_k else "2000k",
+                "%.3f" % float(stats.get("hd_intro_s", 0.0) or 0.0),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            _rht = (await asyncio.wait_for(_rh.communicate(), timeout=5400))[0].decode("utf-8", "replace")
+            await _rh.wait()
+            _rl = [x.strip() for x in _rht.splitlines() if x.strip()]
+            _fin = [x for x in _rl if x.startswith("RESTORE_HEAD")]
+            if _fin and _fin[-1].startswith("RESTORE_HEAD DONE") and _rh_out.exists() \
+                    and _rh_out.stat().st_size > 0:
+                out.unlink(missing_ok=True)
+                _rh_out.rename(out)
+                stats["voice_restored_s"] = float(_fin[-1].split()[-1])
+            elif _fin and "FAILED" in _fin[-1]:
+                stats["voice_restore"] = _fin[-1][:200]
+                _rh_out.unlink(missing_ok=True)
+            _pct = [x for x in _rl if "in the output:" in x]
+            if _pct:
+                stats["dialogue_pct"] = _pct[-1].split("in the output:")[-1].strip()
+                _after = _rl[_rl.index(_pct[-1]) + 1:]
+                stats["dialogue_lines"] = [x for x in _after if x.startswith("voice dub")]
+            _v = [x for x in _rl if x.startswith("DIALOGUE_AUDIT")]
+            if _v:
+                stats["dialogue_gate"] = _v[-1]
+        except Exception as _rhx:
+            stats["voice_restore"] = "not run (%s)" % type(_rhx).__name__
+        # bot21: died on a full disk -> clear space and run this step once more
+        if _rh_try == 1 and _is_enospc(stats.get('voice_restore')):
+            if (await _ensure_space(_step_need_gb(out)))[0]:
+                stats.pop('voice_restore', None)
+                continue
+            stats['voice_restore'] = 'disk full, %.0f GB free -- %s' % (_free_gb(), stats['voice_restore'])
+        break
 
     # ---- SELF-REPAIR: wrong clips the cut check proves (John 2026-09-28) -----
     # "the film carried straight on here": the shot is re-placed at the carry-on place only when
@@ -1029,6 +1055,7 @@ async def run_dubsync(
     try:
         if _cancelled():
             return DubResult(False, None, "cancelled", stats)
+        await _ensure_space(_step_need_gb(out))                        # bot21
         _ar_out = OUT_DIR / f"{title}_repaired.mp4"
         _ar = await asyncio.create_subprocess_exec(
             DLG_PY, AUTO_REPAIR, title, str(out), str(_ar_out),
@@ -1343,6 +1370,58 @@ TAIL_RESTORE = "/opt/dubsync2/tools/tail_restore.py"
 FRAME_AUDIT = "/opt/dubsync2/tools/frame_audit.py"
 # the Somali voice vs the lips, measured on the finished film (bot13, 2026-09-29)
 AV_SYNC = "/opt/dubsync2/tools/av_sync.py"
+# ---- DISK SPACE (bot21, 2026-10-03: Sardar 2 "RESTORE_HEAD FAILED ... -28 No space left on device") --------
+SPACE_GUARD = "/opt/dubsync2/tools/space_guard.py"
+_ENOSPC_MARKS = ("No space left on device", "error code: -28", "Errno 28", "ENOSPC")
+
+
+def _free_gb() -> float:
+    return shutil.disk_usage(str(OUT_DIR)).free / 1e9
+
+
+def _job_need_gb(hd, dub) -> float:
+    """Free space a whole film needs: sources are copied, proxied, analysed, rendered and re-written by the
+    opening / sound / credits steps. Measured 2026-10-02: Kondal (5.1 GB of sources) took the disk from 20 GB
+    free to 1."""
+    try:
+        src = (Path(hd).stat().st_size + Path(dub).stat().st_size) / 1e9
+    except OSError:
+        src = 4.0
+    return max(15.0, min(90.0, 5.0 * src + 10.0))
+
+
+def _step_need_gb(film) -> float:
+    """A step that writes the film again: the new copy, its pieces and the old one side by side."""
+    try:
+        return 3.0 * Path(film).stat().st_size / 1e9 + 3.0
+    except OSError:
+        return 8.0
+
+
+def _is_enospc(text) -> bool:
+    return any(k in str(text or "") for k in _ENOSPC_MARKS)
+
+
+async def _ensure_space(need_gb: float) -> tuple[bool, str]:
+    """(enough, note). With enough free space: nothing runs. Otherwise the space guard clears regenerable
+    data (never a queued or protected film) and the answer is measured again on the disk."""
+    free = _free_gb()
+    if free >= need_gb:
+        return True, ""
+    try:
+        _p = await asyncio.create_subprocess_exec(
+            DLG_PY, SPACE_GUARD, "ensure", "%d" % int(need_gb + 0.999),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        await asyncio.wait_for(_p.communicate(), timeout=900)
+    except Exception:
+        pass
+    free2 = _free_gb()
+    if free2 >= need_gb:
+        return True, "disk: %.0f GB was free, old caches cleared -> %.0f GB" % (free, free2)
+    return False, ("the server's disk is full: %.0f GB free, about %.0f GB needed (old caches were "
+                   "cleared first)" % (free2, need_gb))
+
+
 RESTORE_HEAD = "/opt/dubsync2/tools/restore_head.py"
 OPENING_RESTORE = "/opt/dubsync2/tools/opening_restore.py"
 AUTO_REPAIR = "/opt/dubsync2/tools/auto_repair.py"
