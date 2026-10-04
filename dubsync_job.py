@@ -1237,6 +1237,7 @@ async def run_dubsync(
             stats["credits"] = "not run twice (%s)" % type(_crx2).__name__
 
     stats["contract_missing"] = _contract_missing(stats, out)
+    stats["quality_fail"] = _quality_fail(stats, title)          # bot24: measured rules -> "NOT CLEAN"
 
     return DubResult(True, out,
                      "released" if released else "delivered for review — integrity gate FAILED (NOT final)",
@@ -1285,6 +1286,42 @@ async def make_cut_summary(title: str, name: str, stats: dict, film: str | None 
     except Exception as exc:
         stats["cut_summary_error"] = "%s: %s" % (type(exc).__name__, str(exc)[:160])
         return None, None
+
+
+# bot24 (John 2026-10-04, Toxic 2026 delivered "complete" with 414 of 4711 shots not matching the Somali copy,
+# 60 s of repeats and the picture 31 s behind the sound for minutes): a delivery is NOT CLEAN when its own
+# measurements say so. 30 good films: picture check 95.2-99.3 %, repeats we added 0-5.5 s, unconfirmed 0-2.94 %;
+# the 3 bad ones: <= 93.5 %, >= 22.6 s, >= 6.9 %.
+PIC_OK_MIN = 94.5            # % of checked shots whose picture is what the Somali copy shows
+REPEAT_ADDED_MAX_S = 10.0    # seconds of footage we added a second time
+UNCONF_MAX_PCT = 5.0         # % of shots the placement could not confirm by their picture
+
+
+def _quality_fail(st: dict, title: str) -> list:
+    """The measured rules a delivery breaks (plain lines for the top of the report); [] = clean. Never raises."""
+    bad = []
+    try:
+        _pc = st.get("picture_check") or {}
+        if _pc.get("ok_pct") is not None and float(_pc["ok_pct"]) < PIC_OK_MIN:
+            _n = int(_pc.get("checked") or 0)
+            bad.append("picture: only %.1f%% of %s shots show what the Somali copy shows (%d are wrong or unproven)"
+                       % (float(_pc["ok_pct"]), _n or "the", max(0, _n - int(_pc.get("ok") or 0))))
+    except Exception:
+        pass
+    try:
+        q = _quality_report(title) or {}
+    except Exception:
+        q = {}
+    try:
+        if q.get("replay_s") is not None and float(q["replay_s"]) > REPEAT_ADDED_MAX_S:
+            bad.append("repeats: %.1f s of footage plays twice (added by the sync, not by the Somali copy)"
+                       % float(q["replay_s"]))
+        if q.get("offset_unconf") is not None and float(q["offset_unconf"]) > UNCONF_MAX_PCT:
+            bad.append("placement: %.1f%% of the shots could not be confirmed by their picture"
+                       % float(q["offset_unconf"]))
+    except Exception:
+        pass
+    return bad
 
 
 def _contract_missing(st: dict, out) -> list:
@@ -1501,7 +1538,11 @@ def _park_title_work(title: str, work: Path) -> list:
         if d.is_dir():
             try:
                 PARKED_WORK.mkdir(parents=True, exist_ok=True)
-                dst = PARKED_WORK / ("%s_%s" % (d.name, _t.strftime("%Y%m%d-%H%M%S")))
+                _stamp = _t.strftime("%Y%m%d-%H%M%S")
+                dst, _k = PARKED_WORK / ("%s_%s" % (d.name, _stamp)), 0
+                while dst.exists():                       # bot24: two moves in one second never collide
+                    _k += 1
+                    dst = PARKED_WORK / ("%s_%s_%d" % (d.name, _stamp, _k))
                 shutil.move(str(d), str(dst))
                 moved.append(d.name)
             except Exception:
@@ -2183,6 +2224,9 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
     _nblock = len(st.get("gate_notes") or [])
     _head = "dub-sync complete" if _passed else "⚠️ dub-sync — NEEDS REVIEW (NOT final)"
     _miss = st.get("contract_missing") or []
+    _bad = st.get("quality_fail") or []                          # bot24
+    if _bad:
+        _head = "⛔ dub-sync — NOT CLEAN: do not publish (see the first lines)"
     if _miss:
         _head = "⛔ dub-sync — INCOMPLETE (see the first lines)"
     lines = [f"🎬 **{title}** — {_head}",
@@ -2191,6 +2235,12 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
         lines.append(f"⛔ **{len(_miss)} step(s) did not finish** (each was tried twice):")
         for _x in _miss[:6]:
             lines.append("   · " + _x)
+    if _bad:
+        lines.append(f"⛔ **NOT CLEAN — do not publish.** The film's own checks say ({len(_bad)}):")
+        for _x in _bad[:4]:
+            lines.append("   · " + _x)
+        lines.append("   Most likely this HD is not the version the Somali copy was made from, or the copy is "
+                     "reframed/zoomed. Watch the 🔁 spots below; tell Claude before posting.")
     for _h in (st.get("contract_healed") or [])[:6]:
         lines.append("🩹 self-repaired: " + _h)
     if st.get("auto_repair"):

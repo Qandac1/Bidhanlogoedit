@@ -2797,6 +2797,32 @@ def _set_hd_window(title: str, window) -> None:
         log.warning("hd window not saved for %s: %s", title, exc)
 
 
+def _hd_window_now(title: str):
+    """The window the registry holds for the title ([zx, zy, cx, cy]) or None. Never raises."""
+    try:
+        with open(HD_WINDOWS) as f:
+            e = json.load(f).get(title)
+        w = e.get("window") if isinstance(e, dict) else None
+        return [round(float(x), 4) for x in w] if w and len(w) == 4 else None
+    except Exception:
+        return None
+
+
+def _sync_hd_window(title: str, window, hd, dub) -> list:
+    """Save / clear the title's window (as _set_hd_window); when it CHANGED, the title's saved analyses -- made
+    with the other framing -- are moved aside (bot24). Returns the work dirs moved. Never raises."""
+    old = _hd_window_now(title)
+    _set_hd_window(title, window)
+    if old == _hd_window_now(title):
+        return []
+    try:
+        import dubsync_job
+        return dubsync_job._park_title_work(title, dubsync_job._work_dir_for(Path(hd), Path(dub)))
+    except Exception as exc:
+        log.warning("analyses of %s not moved aside after a window change: %s", title, exc)
+        return []
+
+
 async def _same_film_check(hd: Path, dub: Path) -> dict:
     """{'verdict': 'same'|'different'|'unknown', 'swap': bool, ...pair_check fields}.
     Never raises; any failure = no verdict and no swap."""
@@ -2876,7 +2902,7 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
         hd_src, dub_src = Path(hd_job["src"]), Path(dub_job["src"])
         title = dubsync_job._slug(hd_job["name"])
         # the engine compares the HD cut to a zoomed copy's window (bot18); any other pair clears it
-        _set_hd_window(title, pair.get("hd_window"))
+        _sync_hd_window(title, pair.get("hd_window"), hd_src, dub_src)   # bot24: + old analyses aside on a change
         if pair.get("hd_window"):
             try:
                 await status.reply(
