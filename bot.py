@@ -2748,6 +2748,10 @@ PAIR_MIN_STEPS = 40            # fewer steps (trailers, short clips) = not enoug
 PAIR_ZOOM = ["/opt/dubsync2/.venv/bin/python", "/opt/dubsync2/pair_zoom.py"]
 PAIR_ZOOM_TIMEOUT_S = 900
 PAIR_ZOOM_MIN_PARTS = 8        # zoomed Sardar 10; wrong pairs 0-3 with every window tried (7 controls)
+# bot23 (Toxic 2026): a zoomed copy can still read as a WEAK "same" -- 6 of 10 parts, the zoom never measured, 414
+# of 4711 shots unmatched and 60 s of repeats delivered. Every real unzoomed film in the log scored 8-10 parts:
+# below that the zoom is measured too; its window counts only when it lines the films up in MORE parts.
+PAIR_ZOOM_TRY_BELOW = 8
 HD_WINDOWS = "/opt/dubsync2/hd_windows.json"
 
 
@@ -2819,11 +2823,14 @@ async def _same_film_check(hd: Path, dub: Path) -> dict:
         r["verdict"] = "same"
     else:
         r["verdict"] = "unknown"
-    if r["verdict"] == "different":
+    _weak = ("parts" in r and r.get("chain_steps", 0) >= PAIR_MIN_STEPS
+             and r["parts"] < PAIR_ZOOM_TRY_BELOW)                      # bot23: weak evidence -> measure the zoom
+    if r["verdict"] == "different" or _weak:
         # the same film in a ZOOMED copy? (the real HD is the other file when they were swapped)
         z = await _zoom_check(dub if r["swap"] else hd, hd if r["swap"] else dub)
         r["zoom"] = {k: v for k, v in z.items() if k != "zoom_tried"}
-        if z.get("zoom_parts", 0) >= PAIR_ZOOM_MIN_PARTS and z.get("zoom_window"):
+        if (z.get("zoom_parts", 0) >= PAIR_ZOOM_MIN_PARTS and z.get("zoom_window")
+                and z.get("zoom_parts", 0) > r.get("parts", 0)):
             r["verdict"] = "same"
             r["hd_window"] = z["zoom_window"]
     return r

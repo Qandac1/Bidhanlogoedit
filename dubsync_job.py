@@ -548,6 +548,7 @@ async def run_dubsync(
 
     _job_env = None          # every engine stage's environment (None = the bot's own)
     _speed_retry = False     # one re-analysis with the speed matched, at most
+    _geom_retry = False      # bot22: one re-analysis of a refused SHORT pair with its picture measured
 
     # Expand "repair" into alternating dedupe / re-plan cycles. Each cycle is
     # weighted evenly so the bar keeps moving through them; unused cycles hand
@@ -777,6 +778,19 @@ async def run_dubsync(
                     done_weight -= weight
                     i -= 1
                     continue
+                # SELF-REPAIR 2 (bot22): a SHORT pair (both files under 5 min) refused -> its picture was never
+                # measured inside the clip (Toxic trailer: a player window, another shape). List the title for the
+                # engine's short-clip geometry, move its old analyses aside, analyse once more.
+                if not _geom_retry and _short_pair(hd, dub) and _list_short_geom(title):
+                    _geom_retry = True
+                    stats["short_geom_retry"] = _co.get("unconfirmed_pct")
+                    stats["short_geom_parked"] = _park_title_work(title, _work_dir_for(hd, dub))
+                    stats.setdefault("contract_healed", []).append(
+                        "placement refused on a short clip (%s%% of shots unconfirmed) -- analysed again with its "
+                        "picture measured inside the clip (player frame, bars, shape)" % _co.get("unconfirmed_pct"))
+                    done_weight -= weight
+                    i -= 1
+                    continue
                 _pct = _co.get("unconfirmed_pct")
                 stats["placement"] = str(_co.get("reason", ""))
                 return DubResult(
@@ -791,6 +805,8 @@ async def run_dubsync(
                        "difference matched -- still refused.)\n"
                        % (100 * (float(stats["speed_retry"]) - 1.0))
                        if stats.get("speed_retry") else "")
+                    + ("(Short clip: analysed twice, the second time with its picture measured inside the clip "
+                       "-- still refused.)\n" if "short_geom_retry" in stats else "")
                     + "Send an HD of the SAME version the dub was made from "
                     "(e.g. the WEB-DL / OTT release, not a PreDVD/cam copy), "
                     "then run /dub again.", stats)
@@ -1420,6 +1436,81 @@ async def _ensure_space(need_gb: float) -> tuple[bool, str]:
         return True, "disk: %.0f GB was free, old caches cleared -> %.0f GB" % (free, free2)
     return False, ("the server's disk is full: %.0f GB free, about %.0f GB needed (old caches were "
                    "cleared first)" % (free2, need_gb))
+
+
+# bot22 (Toxic trailer 2026-10-03): a SHORT pair the placement refused is analysed once more with the engine's
+# short-clip geometry -- the picture measured inside the clip (a screen-recorded player's frame, bars, a different
+# shape). The engine applies it only to titles listed in SHORT_GEOM; every other film / clip is unchanged.
+SHORT_GEOM = "/opt/dubsync2/short_geom.json"
+SHORT_CLIP_S = 300.0                         # the engine's own bound (head_scan.SHORT_CLIP_S)
+SHORT_MIN_S = 20.0                           # a real trailer / clip; shorter than this is not a job for it
+PARKED_WORK = Path("/opt/dubsync2/scratch/parked_work")
+
+
+def _media_s(p) -> float:
+    """A file's duration in seconds (0.0 when it cannot be read)."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                              str(p)], capture_output=True, text=True, timeout=120).stdout
+        return float(out.strip().splitlines()[0])
+    except Exception:
+        return 0.0
+
+
+def _short_pair(hd, dub) -> bool:
+    a, b = _media_s(hd), _media_s(dub)
+    return SHORT_MIN_S <= a < SHORT_CLIP_S and SHORT_MIN_S <= b < SHORT_CLIP_S
+
+
+def _list_short_geom(title: str) -> bool:
+    """Add the title to SHORT_GEOM (other titles kept, atomic write). False when it could not be written."""
+    import time as _t
+    try:
+        try:
+            with open(SHORT_GEOM) as f:
+                reg = json.load(f)
+            if not isinstance(reg, dict):
+                reg = {}
+        except (OSError, ValueError):
+            reg = {}
+        reg[title] = {"set": _t.strftime("%Y-%m-%d %H:%M"), "why": "short pair refused by the normal analysis"}
+        tmp = SHORT_GEOM + ".%d.tmp" % os.getpid()
+        with open(tmp, "w") as f:
+            json.dump(reg, f, indent=1)
+        os.replace(tmp, SHORT_GEOM)
+        return True
+    except Exception:
+        return False
+
+
+def _park_title_work(title: str, work: Path) -> list:
+    """Move this pair's work dir and every other work dir of the title aside (moved, never deleted): their
+    thumbs / CLIP / speed caches were made without the geometry and the engine reuses work-dir caches."""
+    import time as _t
+    moved, dirs = [], {Path(work)}
+    try:
+        for sp in Path(work).parent.glob("*/speed.json"):
+            try:
+                if os.path.basename(json.loads(sp.read_text()).get("hd_original", "")).startswith(title + "_hd_"):
+                    dirs.add(sp.parent)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for d in sorted(dirs):
+        if d.is_dir():
+            try:
+                PARKED_WORK.mkdir(parents=True, exist_ok=True)
+                dst = PARKED_WORK / ("%s_%s" % (d.name, _t.strftime("%Y%m%d-%H%M%S")))
+                shutil.move(str(d), str(dst))
+                moved.append(d.name)
+            except Exception:
+                pass
+    try:
+        Path(work).mkdir(parents=True, exist_ok=True)      # the pair's work dir is there again, empty
+    except Exception:
+        pass
+    return moved
 
 
 RESTORE_HEAD = "/opt/dubsync2/tools/restore_head.py"
