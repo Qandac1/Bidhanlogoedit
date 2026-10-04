@@ -1,5 +1,32 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-04 (night) -- bot27 LIVE 23:50: black cinema bars (a wide film in a 16:9 frame)
+
+John (two screenshots: "Pooja Meri Jaan" with black bars vs the bot's CBI 5 without; his 1920x1080 project in
+Premiere / Filmora): "I want the black cinematic bars. I do NOT want the video cropped, stretched or zoomed."
+- Measured on the files: nothing was cropped or stretched. CBI 5's master IS 1920x804 and the bot delivered a
+  1920x804 file; the example is a 1920x1080 file with the bars inside it.
+- The rule responsible: run_dubsync's "never render above the master's own size" (written for Ghost, 1280x542
+  upscaled to 1920x1080) shrank the FRAME to the master's size whenever the setting was larger than the master.
+  The engine's filter was always the right one (scale=W:H:force_original_aspect_ratio=decrease,
+  pad=W:H:(ow-iw)/2:(oh-ih)/2:black); it only needed a 16:9 W x H.
+- **patch_bot_letterbox27:** right after that rule a frame WIDER than 16:9 gets its height raised to 16:9 at the
+  same width (1920x804 -> 1920x1080, 1280x542 -> 1280x720, 3840x1608 -> 3840x2160). The picture keeps its size
+  (never scaled up), its shape and every pixel; same bitrate. 16:9 or narrower masters (also a vertical clip): the
+  frame of before. The logo keeps its place ON THE PICTURE (same pixels from the picture's own edge); the caption
+  letters keep their size. Kill switch: BIDHAAN_LETTERBOX=0.
+- Proof: test_bot_letterbox27 34/34 (real ffmpeg: the picture between the bars is pixel for pixel the master's);
+  run_suites27.sh 13 suites the same on live and patched, the bot22-26 tests pass on the patched copy; a 75-s CBI 5
+  piece through the engine at 1920x1080 watched (bars 138 px, logo on the picture; Saved 63531); then THE REAL
+  BOT on the same clip as an HD + Somali pair from John's account (Saved 63542 + 63543): panel "Output:
+  1920x1080", delivered 23:55 (bot chat 63551), the delivered file downloaded and measured: 1920x1080, bars 138 px
+  top and bottom at 10 / 45 / 80 s.
+- NOT covered, as they were: the dialogue-layer mode (dlg: renders the HD's own frame through its own encoder; it
+  gets its brand settings unchanged) and the logo-only batch path (branding.py scales a source to the setting
+  with a plain scale=W:H -- a source that is not 16:9 is STRETCHED there; found while reading, to be fixed next).
+- The test clip was headed NOT CLEAN by the bot's own picture check (3 of its 21 shots unconfirmed: a 90-s piece
+  cut from the middle of a film); the clip has no logo because the logo setting starts at 2:00.
+
 ## 2026-09-29 (night) — bot12 LIVE: the Somali sound for the whole film
 
 - AUDIO_MODE = "dub" (John: "I don't care music"): the slow "Building audio -- listening" step

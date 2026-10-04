@@ -430,6 +430,45 @@ def identify_pair(a: Path, b: Path) -> tuple[Path, Path]:
     return (a, b) if da >= db else (b, a)
 
 
+# bot27 (John 2026-10-04: "I want the black cinematic bars ... not cropped, stretched or zoomed", like his
+# 1920x1080 Premiere sequence): a frame WIDER than 16:9 -- CBI 5's master is 1920x804 and went out as a 1920x804
+# file -- becomes 16:9 at the same width (1920x1080); the engine's own scale+pad puts the picture in the middle,
+# untouched, with black bars above and below. 16:9 or narrower: the frame of before.
+LETTERBOX_169 = os.environ.get("BIDHAAN_LETTERBOX", "1") != "0"
+
+
+def _frame_169(width: int, height: int) -> tuple:
+    """(frame width, frame height, bar height in pixels) for the render frame the old rules chose. Never raises."""
+    try:
+        w, h = int(width), int(height)
+        if not LETTERBOX_169 or w <= 0 or h <= 0 or w * 9 <= h * 16:
+            return width, height, 0
+        full = int(round(w * 9 / 16.0 / 2)) * 2
+        bar = (full - h) // 2
+        if bar < 1:
+            return width, height, 0
+        return w, full, bar
+    except Exception:
+        return width, height, 0
+
+
+def _brand_on_picture(cfg: dict, pic_h: int, frame_h: int, bar: int) -> dict:
+    """The brand settings for a frame with bars: every logo the same pixels from the PICTURE's edge as in the
+    frame without bars, the caption's letters the same size. A copy; the caller's settings are not touched."""
+    try:
+        if not cfg or bar <= 0 or pic_h <= 0 or frame_h <= 0:
+            return cfg
+        out = json.loads(json.dumps(cfg))
+        for lg in out.get("logos") or []:
+            my = int(float(lg.get("margin_y", 0.015)) * pic_h)
+            lg["margin_y"] = (bar + my + 0.5) / float(frame_h)
+        if out.get("caption_scale"):
+            out["caption_scale"] = float(out["caption_scale"]) * pic_h / float(frame_h)
+        return out
+    except Exception:
+        return cfg
+
+
 async def run_dubsync(
     hd: Path, dub: Path, title: str,
     brand_cfg: dict | None,
@@ -466,6 +505,12 @@ async def run_dubsync(
             width, height = _mw - (_mw % 2), _mh - (_mh % 2)
     except Exception:
         pass
+    # bot27: black cinema bars -- a frame wider than 16:9 becomes 16:9 at the same width
+    _pic_h = height
+    width, height, _bar = _frame_169(width, height)
+    _brand_dlg = brand_cfg          # the dialogue-layer mode renders the HD's own frame: its settings as they are
+    if _bar and brand_cfg:
+        brand_cfg = _brand_on_picture(brand_cfg, _pic_h, height, _bar)
     out_name = f"{title}_final.mp4"
     brand_path = None
     if brand_cfg:
@@ -846,6 +891,12 @@ async def run_dubsync(
                         "from: send another HD of this film, then run /dub again.", stats)
 
     if mode == "dlg":
+        # bot27: this mode renders the HD's own frame (no bars added there): the brand settings as they were
+        if _bar and _brand_dlg and brand_path:
+            try:
+                brand_path.write_text(json.dumps(_brand_dlg))
+            except Exception:
+                pass
         return await _render_dialogue_layer(hd, dub, title, on_progress,
                                             register, _cancelled, stats,
                                             brand_path)
