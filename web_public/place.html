@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<title>Logo studio</title>
+<title>Studio</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
@@ -14,6 +14,7 @@
     --muted: var(--tg-theme-hint-color, #8696a8);
     --accent: var(--tg-theme-button-color, #3d8bfd);
     --accent-fg: var(--tg-theme-button-text-color, #ffffff);
+    --soft: rgba(128, 150, 175, .16);
     --gold: #ffcc4d;
     --r: 14px;
   }
@@ -21,32 +22,53 @@
   html, body { margin: 0; background: var(--bg); color: var(--fg); }
   body { font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
          padding: 12px 12px calc(92px + env(safe-area-inset-bottom)); overscroll-behavior: none; }
-  .wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
-  @media (min-width: 860px) { .wrap { grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr); align-items: start; }
-                              .left { position: sticky; top: 12px; } }
-  header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px; padding: 2px 2px 0; }
+  button, input, textarea { font: inherit; color: inherit; }
+  .wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 880px) { .wrap { grid-template-columns: minmax(0, 1.2fr) minmax(340px, 1fr); align-items: start; } }
+  /* the preview stays in view while the controls scroll under it */
+  .left { position: sticky; top: 12px; z-index: 4; }
+  @media (max-width: 879px) { .left { top: 6px; } .left .card { padding: 10px; box-shadow: 0 10px 22px rgba(0, 0, 0, .45); }
+                              .left h2, .left .chips { display: none; } }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
-  header span { color: var(--muted); font-size: 13px; }
   .col { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); min-width: 0; }
   .card { background: var(--card); border-radius: var(--r); padding: 14px; min-width: 0; }
   .card h2 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
-  /* the frame: a 16:9 screen; the picture (stage) sits in it, with black bars on a cinema film */
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  /* segmented controls */
+  .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--soft); border-radius: 10px; padding: 3px; }
+  .seg button { background: transparent; border: 0; border-radius: 8px; padding: 8px 6px; font-size: 14px; min-height: 36px; cursor: pointer; position: relative; }
+  .seg button.on { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  .seg button[disabled] { opacity: .45; }
+  .seg button .dot { position: absolute; top: 5px; right: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--gold); display: none; }
+  .seg button.changed .dot { display: block; }
+  #sets { flex: 1; min-width: 240px; max-width: 420px; margin-left: auto; }
+  /* preview */
   #screen { background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; }
-  #stage { position: relative; width: 100%; aspect-ratio: 16 / 9; touch-action: none; user-select: none; -webkit-user-select: none; cursor: crosshair;
+  #stage { position: relative; width: 100%; aspect-ratio: 16 / 9; touch-action: none; user-select: none; -webkit-user-select: none; cursor: crosshair; overflow: hidden;
            background: radial-gradient(120% 140% at 15% 10%, #6b8ea3 0%, #33475b 45%, #1d2733 100%); background-size: 100% 100%; }
   .guide { position: absolute; background: var(--gold); opacity: 0; transition: opacity .12s; pointer-events: none; }
   .guide.v { top: 0; bottom: 0; width: 1px; } .guide.h { left: 0; right: 0; height: 1px; } .guide.on { opacity: .9; }
-  .lg { position: absolute; -webkit-user-drag: none; touch-action: none; border-radius: 2px;
-        outline: 1px dashed rgba(255, 255, 255, .45); outline-offset: 2px; cursor: grab; }
-  .lg.sel { outline: 2px solid var(--gold); }
-  .lg.off { display: none; }
-  .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: rgba(128, 150, 175, .14); border-radius: 10px; padding: 3px; margin-top: 10px; }
-  .seg button { background: transparent; color: var(--fg); border: 0; border-radius: 8px; padding: 8px 6px; font-size: 14px; min-height: 36px; cursor: pointer; }
-  .seg button.on { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  .lg { position: absolute; -webkit-user-drag: none; touch-action: none; border-radius: 2px; outline: 1px dashed rgba(255, 255, 255, .45); outline-offset: 2px; cursor: grab; }
+  .lg.sel { outline: 2px solid var(--gold); } .lg.off { display: none; }
+  #cap { position: absolute; left: 0; right: 0; text-align: center; white-space: nowrap; pointer-events: none; font-weight: 700; line-height: 1;
+         text-shadow: 0 0 2px #000, 0 0 2px #000, 0 1px 2px #000; bottom: 9%; }
+  #cap.play { animation: crawl var(--crawl, 5s) linear 1; }
+  @keyframes crawl { from { bottom: -12%; } to { bottom: 108%; } }
   .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-  .chip { font-variant-numeric: tabular-nums; background: rgba(128, 150, 175, .14); border-radius: 999px; padding: 5px 11px; font-size: 13px; color: var(--muted); }
+  .chip { font-variant-numeric: tabular-nums; background: var(--soft); border-radius: 999px; padding: 5px 11px; font-size: 13px; color: var(--muted); }
   .chip b { color: var(--fg); font-weight: 600; }
-  /* logos list */
+  /* tabs */
+  .pane { display: none; } .pane.on { display: grid; gap: 12px; }
+  /* generic controls */
+  .row { display: flex; align-items: center; gap: 10px; }
+  .btn { border: 0; border-radius: 11px; background: var(--soft); font-size: 15px; min-height: 44px; padding: 0 14px; cursor: pointer; }
+  .btn:active { transform: scale(.97); } .btn.sq { width: 44px; padding: 0; font-size: 19px; flex: none; }
+  .btn[disabled] { opacity: .45; }
+  input[type=range] { flex: 1; min-width: 0; height: 44px; accent-color: var(--accent); }
+  .lbl { color: var(--muted); font-size: 13px; margin: 14px 0 6px; }
+  .val { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* logos */
   .logo-row { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 11px; border: 1px solid transparent; cursor: pointer; }
   .logo-row + .logo-row { margin-top: 6px; }
   .logo-row.sel { border-color: var(--gold); background: rgba(255, 204, 77, .07); }
@@ -58,105 +80,204 @@
   .sw i { position: absolute; inset: 0; border-radius: 999px; background: rgba(128, 150, 175, .35); transition: background .15s; pointer-events: none; }
   .sw i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: #fff; transition: transform .15s; }
   .sw input:checked + i { background: var(--accent); } .sw input:checked + i::after { transform: translateX(20px); }
-  /* controls */
-  .row { display: flex; align-items: center; gap: 10px; }
-  .btn { border: 0; border-radius: 11px; background: rgba(128, 150, 175, .16); color: var(--fg); font-size: 15px; min-height: 44px; padding: 0 14px; cursor: pointer; }
-  .btn:active { transform: scale(.97); } .btn.sq { width: 44px; padding: 0; font-size: 19px; flex: none; }
-  input[type=range] { flex: 1; min-width: 0; height: 44px; accent-color: var(--accent); }
-  .pad { display: grid; grid-template-columns: repeat(3, 44px); gap: 6px; }
-  .pad .btn { width: 44px; padding: 0; font-size: 16px; }
-  .two { display: flex; justify-content: space-between; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
-  .two .lbl { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  .pad { display: grid; grid-template-columns: repeat(3, 44px); gap: 6px; } .pad .btn { width: 44px; padding: 0; font-size: 16px; }
+  .two { display: flex; justify-content: space-between; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
   .arrows { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(2, 44px); gap: 6px; }
   .arrows .btn { width: 44px; padding: 0; } .arrows .up { grid-column: 2; } .arrows .lf { grid-column: 1; grid-row: 2; }
   .arrows .dn { grid-column: 2; grid-row: 2; } .arrows .rt { grid-column: 3; grid-row: 2; }
-  .time { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-  .time output { flex: 1; text-align: center; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  /* caption */
+  textarea { width: 100%; min-height: 64px; resize: vertical; border: 1px solid var(--soft); border-radius: 11px; background: rgba(0, 0, 0, .18); padding: 10px 12px; font-size: 16px; }
+  textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .fonts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  @media (min-width: 520px) { .fonts { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .font { border: 1px solid transparent; border-radius: 11px; background: var(--soft); padding: 10px 8px 8px; text-align: center; cursor: pointer; min-width: 0; }
+  .font b { display: block; font-size: 20px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .font small { color: var(--muted); font-size: 11px; }
+  .font.on { border-color: var(--gold); background: rgba(255, 204, 77, .09); }
+  .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
+  .swatch { width: 38px; height: 38px; border-radius: 50%; border: 3px solid transparent; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .35); padding: 0; }
+  .swatch.on { border-color: var(--gold); }
+  /* timeline */
+  .track { position: relative; height: 64px; border-radius: 11px; background: rgba(0, 0, 0, .22); touch-action: none; user-select: none; -webkit-user-select: none; cursor: copy; margin-top: 10px; overflow: hidden; }
+  .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(128, 150, 175, .25); pointer-events: none; }
+  .tick span { position: absolute; bottom: 3px; left: 4px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .zone { position: absolute; top: 8px; height: 14px; border-radius: 7px; background: rgba(61, 139, 253, .35); pointer-events: none; }
+  .zone.cut { top: 0; bottom: 0; height: auto; border-radius: 0; background: repeating-linear-gradient(45deg, rgba(255, 82, 82, .30) 0 6px, rgba(255, 82, 82, .12) 6px 12px); }
+  .mark { position: absolute; top: 28px; width: 26px; height: 26px; margin-left: -13px; border-radius: 50%; background: var(--gold); color: #1d1500; font-size: 11px; font-weight: 700;
+          display: flex; align-items: center; justify-content: center; cursor: grab; touch-action: none; box-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
+  .mark.sel { outline: 3px solid #fff; }
+  .mark.logo { top: 3px; background: var(--accent); color: var(--accent-fg); border-radius: 7px; width: 38px; height: 22px; margin-left: -19px; }
+  .times { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tchip { display: inline-flex; align-items: center; gap: 6px; background: var(--soft); border-radius: 999px; padding: 6px 6px 6px 12px; font-variant-numeric: tabular-nums; font-size: 14px; cursor: pointer; }
+  .tchip.sel { outline: 2px solid var(--gold); }
+  .tchip button { border: 0; background: rgba(0, 0, 0, .25); width: 24px; height: 24px; border-radius: 50%; font-size: 14px; line-height: 1; cursor: pointer; padding: 0; }
+  .tf { display: flex; align-items: center; gap: 8px; }
+  .tf output { min-width: 84px; text-align: center; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; cursor: pointer; border-radius: 9px; padding: 7px 4px; background: rgba(0, 0, 0, .18); }
   /* bottom bar */
-  .bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); z-index: 5;
          background: linear-gradient(to top, var(--bg) 70%, transparent); display: flex; justify-content: center; }
-  .bar .in { width: 100%; max-width: 1040px; display: flex; gap: 10px; }
+  .bar .in { width: 100%; max-width: 1080px; display: flex; gap: 10px; }
   .bar .btn { min-height: 50px; font-size: 16px; }
   #save { flex: 1; background: var(--accent); color: var(--accent-fg); font-weight: 700; }
-  #save[disabled] { opacity: .5; }
-  #out { display: none; } #cmd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; margin-top: 8px; }
-  #empty { display: none; color: var(--muted); }
+  #toast { position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: rgba(0, 0, 0, .85); color: #fff; padding: 9px 14px; border-radius: 10px; font-size: 14px;
+           opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 6; max-width: 92vw; text-align: center; }
+  #toast.on { opacity: 1; }
+  #out { display: none; } #cmd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; margin-top: 8px; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header><h1>Logo studio</h1><span>move it, size it, time it</span></header>
+<div class="wrap" id="wrap">
+  <header>
+    <h1>Studio</h1>
+    <div class="seg" id="sets" aria-label="which settings">
+      <button data-set="banner" type="button">Banner jobs<span class="dot"></span></button>
+      <button data-set="dub" type="button">Dub-sync films<span class="dot"></span></button>
+    </div>
+  </header>
 
   <div class="col left">
     <section class="card">
       <h2>Preview</h2>
       <div id="screen"><div id="stage">
         <div class="guide v" id="gv"></div><div class="guide h" id="gh"></div>
+        <div id="cap"></div>
       </div></div>
-      <div class="seg" id="shapes">
-        <button id="s169" class="on" type="button">16:9 film</button>
-        <button id="swide" type="button">Cinema (black bars)</button>
+      <div class="row" style="margin-top:10px">
+        <div class="seg" id="shapes" style="flex:1">
+          <button id="s169" class="on" type="button">16:9 film</button>
+          <button id="swide" type="button">Cinema film</button>
+        </div>
+        <button class="btn" id="play" type="button">&#9654; Caption</button>
       </div>
       <div class="chips">
         <span class="chip">Left <b id="rx">–</b></span><span class="chip">Top <b id="ry">–</b></span><span class="chip">Size <b id="rw">–</b></span>
       </div>
-      <p class="hint">Drag anywhere on the picture to move the selected logo. Tap a spot to put it there.</p>
     </section>
   </div>
 
   <div class="col">
-    <section class="card">
-      <h2>Logos</h2>
-      <div id="list"></div>
-      <div id="empty">No logo image was found for your account.</div>
-    </section>
+    <div class="seg card" id="tabs" style="padding:3px">
+      <button data-tab="logo" class="on" type="button">Logo</button>
+      <button data-tab="caption" type="button">Caption</button>
+      <button data-tab="time" type="button">Timeline</button>
+      <button data-tab="trim" type="button">Trim</button>
+    </div>
 
-    <section class="card">
-      <h2>Size and place</h2>
-      <div class="row">
-        <button class="btn sq" id="minus" type="button" aria-label="smaller">&minus;</button>
-        <input type="range" id="size" min="3" max="70" step="0.5" aria-label="logo size">
-        <button class="btn sq" id="plus" type="button" aria-label="larger">+</button>
-      </div>
-      <div class="two">
-        <div>
-          <div class="lbl">Quick place</div>
-          <div class="pad" id="pad">
-            <button class="btn" data-p="0,0" type="button" aria-label="top left">&#8598;</button><button class="btn" data-p="1,0" type="button" aria-label="top centre">&#8593;</button><button class="btn" data-p="2,0" type="button" aria-label="top right">&#8599;</button>
-            <button class="btn" data-p="0,1" type="button" aria-label="middle left">&#8592;</button><button class="btn" data-p="1,1" type="button" aria-label="centre">&#9678;</button><button class="btn" data-p="2,1" type="button" aria-label="middle right">&#8594;</button>
-            <button class="btn" data-p="0,2" type="button" aria-label="bottom left">&#8601;</button><button class="btn" data-p="1,2" type="button" aria-label="bottom centre">&#8595;</button><button class="btn" data-p="2,2" type="button" aria-label="bottom right">&#8600;</button>
+    <div class="pane on" id="p-logo">
+      <section class="card">
+        <h2>Logos</h2>
+        <div id="list"></div>
+        <p class="hint">Drag anywhere on the picture to move the selected logo. Tap a spot to put it there.</p>
+      </section>
+      <section class="card">
+        <h2>Size and place</h2>
+        <div class="row">
+          <button class="btn sq" id="minus" type="button" aria-label="smaller">&minus;</button>
+          <input type="range" id="size" min="3" max="70" step="0.5" aria-label="logo size">
+          <button class="btn sq" id="plus" type="button" aria-label="larger">+</button>
+        </div>
+        <div class="two">
+          <div>
+            <div class="lbl">Quick place</div>
+            <div class="pad" id="pad">
+              <button class="btn" data-p="0,0" type="button" aria-label="top left">&#8598;</button><button class="btn" data-p="1,0" type="button" aria-label="top centre">&#8593;</button><button class="btn" data-p="2,0" type="button" aria-label="top right">&#8599;</button>
+              <button class="btn" data-p="0,1" type="button" aria-label="middle left">&#8592;</button><button class="btn" data-p="1,1" type="button" aria-label="centre">&#9678;</button><button class="btn" data-p="2,1" type="button" aria-label="middle right">&#8594;</button>
+              <button class="btn" data-p="0,2" type="button" aria-label="bottom left">&#8601;</button><button class="btn" data-p="1,2" type="button" aria-label="bottom centre">&#8595;</button><button class="btn" data-p="2,2" type="button" aria-label="bottom right">&#8600;</button>
+            </div>
+          </div>
+          <div>
+            <div class="lbl">Fine steps</div>
+            <div class="arrows">
+              <button class="btn up" data-n="0,-1" type="button" aria-label="up">&#9650;</button>
+              <button class="btn lf" data-n="-1,0" type="button" aria-label="left">&#9664;</button>
+              <button class="btn dn" data-n="0,1" type="button" aria-label="down">&#9660;</button>
+              <button class="btn rt" data-n="1,0" type="button" aria-label="right">&#9654;</button>
+            </div>
           </div>
         </div>
-        <div>
-          <div class="lbl">Fine steps</div>
-          <div class="arrows">
-            <button class="btn up" data-n="0,-1" type="button" aria-label="up">&#9650;</button>
-            <button class="btn lf" data-n="-1,0" type="button" aria-label="left">&#9664;</button>
-            <button class="btn dn" data-n="0,1" type="button" aria-label="down">&#9660;</button>
-            <button class="btn rt" data-n="1,0" type="button" aria-label="right">&#9654;</button>
-          </div>
-        </div>
-      </div>
-    </section>
+      </section>
+    </div>
 
-    <section class="card">
-      <h2>When the logo appears</h2>
-      <div class="seg" id="tchips" style="margin-top:0">
-        <button data-t="0" type="button">Start</button><button data-t="20" type="button">20 s</button><button data-t="45" type="button">45 s</button>
-        <button data-t="60" type="button">1 min</button><button data-t="120" type="button">2 min</button>
-      </div>
-      <div class="time">
-        <button class="btn sq" id="tminus" type="button" aria-label="5 seconds earlier">&minus;</button>
-        <output id="tval">0:00</output>
-        <button class="btn sq" id="tplus" type="button" aria-label="5 seconds later">+</button>
-      </div>
-      <p class="hint">Counted from the first second of the film. Use it to keep the logo off the studio's opening cards.</p>
-    </section>
+    <div class="pane" id="p-caption">
+      <section class="card">
+        <h2>Caption</h2>
+        <textarea id="ctext" maxlength="200" rows="2" placeholder="Leave empty for no caption" aria-label="caption text"></textarea>
+        <div class="lbl">Font</div>
+        <div class="fonts" id="fonts"></div>
+        <div class="lbl">Colour</div>
+        <div class="swatches" id="colors"></div>
+        <div class="lbl">Letter size <span class="val" id="csizev"></span></div>
+        <div class="row">
+          <button class="btn sq" id="cminus" type="button" aria-label="smaller letters">&minus;</button>
+          <input type="range" id="csize" min="0.8" max="6" step="0.1" aria-label="caption size">
+          <button class="btn sq" id="cplus" type="button" aria-label="larger letters">+</button>
+        </div>
+        <div class="lbl">Time to cross the screen <span class="val" id="cspeedv"></span></div>
+        <input type="range" id="cspeed" min="5" max="60" step="1" style="width:100%" aria-label="caption speed">
+      </section>
+      <section class="card">
+        <h2>How often</h2>
+        <div class="seg" id="cmode">
+          <button data-m="count" type="button">Spread over the film</button>
+          <button data-m="times" type="button">At exact times</button>
+        </div>
+        <div id="ccount" class="row" style="margin-top:12px">
+          <button class="btn sq" id="nminus" type="button" aria-label="fewer times">&minus;</button>
+          <div style="flex:1;text-align:center"><span class="val" id="nval" style="font-size:22px"></span><div class="hint" style="margin:0">times, evenly spread</div></div>
+          <button class="btn sq" id="nplus" type="button" aria-label="more times">+</button>
+        </div>
+        <p class="hint" id="ctimes">Set the exact times on the <b>Timeline</b> tab.</p>
+      </section>
+    </div>
+
+    <div class="pane" id="p-time">
+      <section class="card">
+        <h2>Timeline</h2>
+        <div class="seg" id="lens"></div>
+        <div class="track" id="track"></div>
+        <p class="hint">Blue = the logo is on. Gold dots = the caption crosses the screen. Tap the bar to add a caption time, drag a dot to move it.</p>
+        <div class="lbl">Logo appears at</div>
+        <div class="seg" id="tchips">
+          <button data-t="0" type="button">Start</button><button data-t="20" type="button">20 s</button><button data-t="45" type="button">45 s</button>
+          <button data-t="60" type="button">1 min</button><button data-t="120" type="button">2 min</button>
+        </div>
+        <div class="tf" style="margin-top:10px">
+          <button class="btn sq" data-tf="start,-5" type="button" aria-label="5 seconds earlier">&minus;</button>
+          <output id="tf-start" data-edit="start"></output>
+          <button class="btn sq" data-tf="start,5" type="button" aria-label="5 seconds later">+</button>
+          <span class="hint" style="margin:0">Tap the time to type it.</span>
+        </div>
+        <div class="lbl">Caption times <span class="val" id="tcount"></span></div>
+        <div class="times" id="times"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="tadd" type="button">+ Add a time</button>
+          <button class="btn" id="tclear" type="button">Clear all</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="pane" id="p-trim">
+      <section class="card">
+        <h2>Trim the video</h2>
+        <p class="hint" id="trimnote" style="margin:0 0 10px"></p>
+        <div class="seg" id="tmode" style="grid-auto-flow:row;grid-template-columns:repeat(5,minmax(0,1fr))">
+          <button data-m="off" type="button">Off</button><button data-m="head" type="button">Cut start</button><button data-m="tail" type="button">Cut end</button>
+          <button data-m="range" type="button">Keep part</button><button data-m="cut" type="button">Cut part</button>
+        </div>
+        <div id="trima">
+          <div class="lbl" id="trimal"></div>
+          <div class="tf"><button class="btn sq" data-tf="ta,-5" type="button" aria-label="5 seconds less">&minus;</button><output id="tf-ta" data-edit="ta"></output><button class="btn sq" data-tf="ta,5" type="button" aria-label="5 seconds more">+</button></div>
+        </div>
+        <div id="trimb">
+          <div class="lbl" id="trimbl"></div>
+          <div class="tf"><button class="btn sq" data-tf="tb,-5" type="button" aria-label="5 seconds less">&minus;</button><output id="tf-tb" data-edit="tb"></output><button class="btn sq" data-tf="tb,5" type="button" aria-label="5 seconds more">+</button></div>
+        </div>
+      </section>
+    </div>
 
     <section class="card" id="out">
       <h2>Opened outside Telegram</h2>
-      Send these lines to the bot instead:
+      Nothing can be saved from here. Open the Studio from the bot with /studio.
       <div id="cmd"></div>
     </section>
   </div>
@@ -166,6 +287,7 @@
   <button class="btn" id="reset" type="button">Reset</button>
   <button class="btn" id="save" type="button">Save</button>
 </div></div>
+<div id="toast"></div>
 
 <script>
 (function () {
@@ -173,178 +295,338 @@
   var tg = (window.Telegram && Telegram.WebApp && Telegram.WebApp.platform && Telegram.WebApp.platform !== "unknown") ? Telegram.WebApp : null;
   if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {} }
   function $(id) { return document.getElementById(id); }
-  function b64(s) { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return decodeURIComponent(escape(atob(s))); }
-  var P = { logos: [], bg: "", ar: 16 / 9, start: 0 };
-  try { var q = JSON.parse(b64(new URLSearchParams(location.search).get("d") || "")); for (var k in q) P[k] = q[k]; } catch (e) {}
-
-  var stage = $("stage"), items = [], sel = -1, AR = P.ar || 16 / 9;
-  var MINW = 0.03, MAXW = 0.70, SNAP = 0.012, MARGIN_X = 0.03, T_MAX = 3 * 3600;
-  var start0 = Math.max(0, Math.min(T_MAX, Math.round(+P.start || 0))), startT = start0;
-
-  // ---- shape of the picture: a 16:9 screen, the picture inside it (bars on a cinema film) ----
-  function setShape(ar) {
-    AR = ar;
-    stage.style.aspectRatio = String(ar);
-    if (ar >= 16 / 9) { stage.style.width = "100%"; stage.style.height = "auto"; }
-    else { stage.style.height = "100%"; stage.style.width = "auto"; }
-    layout();
+  function each(sel, fn) { Array.prototype.forEach.call(document.querySelectorAll(sel), fn); }
+  function clampN(v, a, b) { return Math.min(b, Math.max(a, v)); }
+  function r4(v) { return +(+v).toFixed(4); }
+  function pct(v) { return (v * 100).toFixed(1) + " %"; }
+  function hms(t) { t = Math.max(0, Math.round(t)); var h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+                    return (h ? h + ":" + ("0" + m).slice(-2) : m) + ":" + ("0" + s).slice(-2); }
+  function parseT(str) {                                             // "90", "1:30", "1:02:03" -> seconds, or null
+    var p = String(str || "").trim().split(":"), t = 0;
+    if (p.length > 3 || p[0] === "") return null;
+    for (var i = 0; i < p.length; i++) { if (!/^\d+(\.\d+)?$/.test(p[i])) return null; t = t * 60 + parseFloat(p[i]); }
+    return t;
   }
-  if (P.bg) {
-    var bg = new Image();
-    bg.onload = function () { stage.style.backgroundImage = "url('" + P.bg + "')"; $("shapes").style.display = "none"; setShape(bg.naturalWidth / bg.naturalHeight); };
-    bg.src = P.bg;
+  function toast(msg) { var t = $("toast"); t.textContent = msg; t.className = "on"; clearTimeout(toast.h); toast.h = setTimeout(function () { t.className = ""; }, 2200); }
+
+  var stage = $("stage"), AR = 16 / 9, C = null, S = {}, cur = "banner", sel = -1, selT = -1, LEN = 7200;
+  var MINW = 0.03, MAXW = 0.70, SNAP = 0.012, MARGIN_X = 0.03, T_MAX = 6 * 3600, MAX_TIMES = 40;
+  var FONTS = [{ id: "", label: "Classic", css: "sans-serif" }], COLORS = [{ id: "white", css: "#ffffff" }];
+  var LENS = [1800, 3600, 5400, 7200, 9000, 10800];
+
+  // ---------------------------------------------------------------- data
+  function capOut(c) { return { text: c.text.replace(/\s+/g, " ").trim(), font: c.font, color: c.color, size: r4(c.size), seconds: c.seconds, count: c.count, times: c.times.slice() }; }
+  function trimOut(t) { return { mode: t.mode, a: Math.round(t.a), b: Math.round(t.b) }; }
+  function norm(set) {                                               // one set of settings, as the page works with it
+    var c = set.cap || {}, t = set.trim || {};
+    var st = { logos: (set.logos || []).map(function (L) { return { n: L.n, label: L.label || L.n, img: L.img, c: L.c || "TL", mx: +L.mx || 0, my: +L.my || 0,
+                                                                    w: +L.w || 0.13, on: L.on !== false, x: null, y: null, ratio: 0.3, ready: false, touched: false }; }),
+               start: clampN(Math.round(+set.start || 0), 0, T_MAX),
+               cap: { text: String(c.text || ""), font: String(c.font || ""), color: String(c.color || "white"), size: clampN(+c.size || 0.016, 0.008, 0.06),
+                      seconds: clampN(Math.round(+c.seconds || 25), 5, 60), count: clampN(Math.round(+c.count || 0), 0, 40),
+                      times: (c.times || []).map(function (x) { return Math.round(+x); }).filter(function (x) { return x >= 0 && x <= T_MAX; }).sort(function (a, b) { return a - b; }) },
+               trim: { mode: ["off", "head", "tail", "range", "cut"].indexOf(t.mode) >= 0 ? t.mode : "off", a: Math.max(0, +t.a || 0), b: Math.max(0, +t.b || 0) } };
+    st.base = { start: st.start, cap: capOut(st.cap), trim: trimOut(st.trim) };
+    return st;
+  }
+  function logoChanged(L) { return L.ready && L.touched && (r4(L.x) !== r4(L.x0) || r4(L.y) !== r4(L.y0) || r4(L.w) !== r4(L.w0) || L.on !== L.on0); }
+  function diff(name) {                                              // only the parts of a set that changed
+    var s_ = S[name], out = {}, any = false;
+    if (s_.logos.some(logoChanged)) {
+      out.logos = s_.logos.filter(function (L) { return L.ready; }).map(function (L) { return { n: L.n, on: !!L.on, x: r4(L.x), y: r4(L.y), w: r4(L.w) }; }); any = true; }
+    if (s_.start !== s_.base.start) { out.start = s_.start; any = true; }
+    var c = capOut(s_.cap); if (JSON.stringify(c) !== JSON.stringify(s_.base.cap)) { out.cap = c; any = true; }
+    var t = trimOut(s_.trim); if (name !== "dub" && JSON.stringify(t) !== JSON.stringify(s_.base.trim)) { out.trim = t; any = true; }
+    return any ? out : null;
+  }
+  function result() {
+    var sets = {}, any = false;
+    ["banner", "dub"].forEach(function (n) { if (!S[n]) return; var d = diff(n); if (d) { sets[n] = d; any = true; } });
+    return any ? { k: "studio", v: 3, sets: sets } : null;
+  }
+  window.__result = result;                                          // read by the tests
+  window.__state = function () { return { cur: cur, S: S, LEN: LEN, AR: AR }; };
+  function st() { return S[cur]; }
+
+  // ---------------------------------------------------------------- shape of the picture
+  function setShape(ar) {
+    AR = ar; stage.style.aspectRatio = String(ar);
+    if (ar >= 16 / 9) { stage.style.width = "100%"; stage.style.height = "auto"; } else { stage.style.height = "100%"; stage.style.width = "auto"; }
+    render();
   }
   function pickShape(wide) { $("swide").className = wide ? "on" : ""; $("s169").className = wide ? "" : "on"; setShape(wide ? 2.39 : 16 / 9); }
   $("s169").onclick = function () { pickShape(false); };
   $("swide").onclick = function () { pickShape(true); };
 
-  // ---- geometry ----
-  function hOf(it) { return it.w * AR * it.ratio; }                 // logo height as a share of the picture's height
-  function clamp(it) {
-    it.w = Math.min(MAXW, Math.max(MINW, it.w));
-    if (hOf(it) > 1) it.w = 1 / (AR * it.ratio);
-    it.x = Math.min(1 - it.w, Math.max(0, it.x));
-    it.y = Math.min(1 - hOf(it), Math.max(0, it.y));
+  // ---------------------------------------------------------------- logos
+  function hOf(L) { return L.w * AR * L.ratio; }
+  function clampL(L) {
+    L.w = clampN(L.w, MINW, MAXW);
+    if (hOf(L) > 1) L.w = 1 / (AR * L.ratio);
+    L.x = clampN(L.x, 0, 1 - L.w); L.y = clampN(L.y, 0, 1 - hOf(L));
   }
-  function fromCorner(it, L) {                                       // the bot's corner + margins -> left / top
-    var c = L.c || "TL";
-    it.x = (c === "TR" || c === "BR") ? 1 - it.w - L.mx : L.mx;
-    it.y = (c === "BL" || c === "BR") ? 1 - hOf(it) - L.my : L.my;
+  function fromCorner(L) {                                           // the bot's corner + margins -> left / top
+    L.x = (L.c === "TR" || L.c === "BR") ? 1 - L.w - L.mx : L.mx;
+    L.y = (L.c === "BL" || L.c === "BR") ? 1 - hOf(L) - L.my : L.my;
   }
-  function pct(v) { return (v * 100).toFixed(1) + " %"; }
-  function mmss(t) { return Math.floor(t / 60) + ":" + ("0" + (t % 60)).slice(-2); }
-
-  function layout() {
-    items.forEach(function (it, i) {
-      if (!it.ready) return;
-      clamp(it);
-      it.el.style.left = (it.x * 100) + "%"; it.el.style.top = (it.y * 100) + "%"; it.el.style.width = (it.w * 100) + "%";
-      it.el.className = "lg" + (i === sel ? " sel" : "") + (it.on ? "" : " off");
-      it.row.className = "logo-row" + (i === sel ? " sel" : "");
-      it.sub.textContent = it.on ? "left " + pct(it.x) + " · top " + pct(it.y) + " · size " + pct(it.w) : "switched off";
+  function curL() { var L = st() && st().logos[sel]; return (L && L.ready && L.on) ? L : null; }
+  function pickOn() { if (curL()) return; var ls = st().logos; for (var i = 0; i < ls.length; i++) if (ls[i].ready && ls[i].on) { sel = i; return; } }
+  function buildLogos() {
+    each(".lg", function (e) { e.parentNode.removeChild(e); });
+    $("list").innerHTML = "";
+    var mine = cur;
+    st().logos.forEach(function (L, i) {
+      var el = new Image(); el.className = "lg"; el.draggable = false; el.alt = L.label; L.el = el;
+      var row = document.createElement("div"); row.className = "logo-row";
+      row.innerHTML = '<img class="thumb" alt=""><div class="name"></div><label class="sw"><input type="checkbox"><i></i></label>';
+      row.querySelector(".thumb").src = L.img;
+      var name = row.querySelector(".name"); name.textContent = L.label; L.sub = document.createElement("small"); name.appendChild(L.sub);
+      var box = row.querySelector("input"); box.checked = L.on; box.setAttribute("aria-label", L.label + " on or off");
+      box.onchange = function () { L.on = box.checked; L.touched = true; if (L.on) sel = i; else pickOn(); render(); };
+      row.onclick = function (e) { if (e.target === box) return; sel = i; render(); };
+      L.row = row; L.box = box; $("list").appendChild(row);
+      el.onload = function () {
+        if (cur !== mine || L.el !== el) return;                     // the set was switched while the image loaded
+        if (L.x === null) { L.ratio = el.naturalHeight / el.naturalWidth; fromCorner(L); clampL(L); L.x0 = L.x; L.y0 = L.y; L.w0 = L.w; L.on0 = L.on; }
+        L.ready = true; stage.insertBefore(el, $("cap"));
+        pickOn(); render();
+      };
+      el.src = L.img;
     });
-    var it = items[sel], live = it && it.ready && it.on;
-    $("rx").textContent = live ? pct(it.x) : "–"; $("ry").textContent = live ? pct(it.y) : "–"; $("rw").textContent = live ? pct(it.w) : "–";
-    if (live) $("size").value = (it.w * 100).toFixed(1);
-    $("tval").textContent = mmss(startT);
-    var tb = $("tchips").children;
-    for (var k = 0; k < tb.length; k++) tb[k].className = (+tb[k].getAttribute("data-t") === startT) ? "on" : "";
+    if (!st().logos.length) $("list").innerHTML = '<p class="hint" style="margin:0">No logo image was found for your account. Upload one in the bot with /logo.</p>';
   }
-  function cur() { var it = items[sel]; return (it && it.ready && it.on) ? it : null; }
-  function pickOn() {                                                // keep the selection on a logo that is switched on
-    if (cur()) return;
-    for (var i = 0; i < items.length; i++) if (items[i].ready && items[i].on) { sel = i; return; }
-  }
-  function select(i) { sel = i; layout(); }
 
-  // ---- the logos ----
-  (P.logos || []).forEach(function (L, i) {
-    var it = { n: L.n, label: L.label || L.n, w: +L.w || 0.13, x: 0, y: 0, ratio: 0.3, ready: false, on: L.on !== false, el: new Image() };
-    it.el.className = "lg"; it.el.draggable = false; it.el.alt = it.label;
-    var row = document.createElement("div"); row.className = "logo-row";
-    row.innerHTML = '<img class="thumb" alt=""><div class="name"></div><label class="sw"><input type="checkbox"><i></i></label>';
-    row.querySelector(".thumb").src = L.img;
-    var name = row.querySelector(".name"); name.textContent = it.label;
-    it.sub = document.createElement("small"); name.appendChild(it.sub);
-    var box = row.querySelector("input"); box.checked = it.on; box.setAttribute("aria-label", it.label + " on or off");
-    box.onchange = function () { it.on = box.checked; if (it.on) sel = i; else pickOn(); layout(); };
-    row.onclick = function (e) { if (e.target === box) return; select(i); };
-    it.row = row; it.box = box; $("list").appendChild(row);
-    it.el.onload = function () {
-      it.ratio = it.el.naturalHeight / it.el.naturalWidth; fromCorner(it, L); clamp(it);
-      it.start = { x: it.x, y: it.y, w: it.w, on: it.on }; it.ready = true; stage.appendChild(it.el);
-      if (sel < 0 || (!items[sel].on && it.on)) sel = i;
-      layout();
-    };
-    it.el.src = L.img;
-    items.push(it);
-  });
-  if (!(P.logos || []).length) { $("empty").style.display = "block"; $("save").disabled = true; }
-
-  // ---- dragging: anywhere on the picture moves the selected logo; a logo under the finger is selected first;
-  //      a tap on the picture puts the selected logo's middle there; the middle lines are magnetic ----
   var drag = null;
-  function snap(it) {
-    var gx = null, gy = null, cx = it.x + it.w / 2, cy = it.y + hOf(it) / 2;
-    if (Math.abs(cx - 0.5) < SNAP) { it.x = 0.5 - it.w / 2; gx = 0.5; }
-    if (Math.abs(cy - 0.5) < SNAP * AR) { it.y = 0.5 - hOf(it) / 2; gy = 0.5; }
+  function snapMid(L) {
+    var gx = null, gy = null, cx = L.x + L.w / 2, cy = L.y + hOf(L) / 2;
+    if (Math.abs(cx - 0.5) < SNAP) { L.x = 0.5 - L.w / 2; gx = 0.5; }
+    if (Math.abs(cy - 0.5) < SNAP * AR) { L.y = 0.5 - hOf(L) / 2; gy = 0.5; }
     $("gv").style.left = (gx === null ? 0 : gx * 100) + "%"; $("gv").className = "guide v" + (gx === null ? "" : " on");
     $("gh").style.top = (gy === null ? 0 : gy * 100) + "%"; $("gh").className = "guide h" + (gy === null ? "" : " on");
   }
   function guidesOff() { $("gv").className = "guide v"; $("gh").className = "guide h"; }
   stage.addEventListener("pointerdown", function (e) {
     var onLogo = false;
-    items.forEach(function (it, i) { if (e.target === it.el) { sel = i; onLogo = true; } });
-    var it = cur();
-    layout();
-    if (!it) return;
-    drag = { px: e.clientX, py: e.clientY, x: it.x, y: it.y, moved: false, onLogo: onLogo };
+    st().logos.forEach(function (L, i) { if (e.target === L.el) { sel = i; onLogo = true; } });
+    var L = curL(); render();
+    if (!L) return;
+    drag = { px: e.clientX, py: e.clientY, x: L.x, y: L.y, moved: false, onLogo: onLogo };
     try { stage.setPointerCapture(e.pointerId); } catch (err) {}
     e.preventDefault();
   });
   stage.addEventListener("pointermove", function (e) {
-    var it = cur();
-    if (!drag || !it) return;
+    var L = curL(); if (!drag || !L) return;
     if (Math.abs(e.clientX - drag.px) + Math.abs(e.clientY - drag.py) > 6) drag.moved = true;
     if (!drag.moved) return;
     var r = stage.getBoundingClientRect();
-    it.x = drag.x + (e.clientX - drag.px) / r.width; it.y = drag.y + (e.clientY - drag.py) / r.height;
-    clamp(it); snap(it); layout();
+    L.x = drag.x + (e.clientX - drag.px) / r.width; L.y = drag.y + (e.clientY - drag.py) / r.height; L.touched = true;
+    clampL(L); snapMid(L); render();
   });
   stage.addEventListener("pointerup", function (e) {
-    var it = cur();
-    if (drag && it && !drag.moved && !drag.onLogo) {
-      var r = stage.getBoundingClientRect();
-      it.x = (e.clientX - r.left) / r.width - it.w / 2; it.y = (e.clientY - r.top) / r.height - hOf(it) / 2; layout();
-    }
-    drag = null; guidesOff();
+    var L = curL();
+    if (drag && L && !drag.moved && !drag.onLogo) { var r = stage.getBoundingClientRect();
+      L.x = (e.clientX - r.left) / r.width - L.w / 2; L.y = (e.clientY - r.top) / r.height - hOf(L) / 2; L.touched = true; }
+    drag = null; guidesOff(); render();
   });
   stage.addEventListener("pointercancel", function () { drag = null; guidesOff(); });
-
-  // ---- size, quick places, fine steps ----
-  function resize(w) { var it = cur(); if (!it) return; var cx = it.x + it.w / 2, cy = it.y + hOf(it) / 2;
-                       it.w = w; clamp(it); it.x = cx - it.w / 2; it.y = cy - hOf(it) / 2; layout(); }
+  function resize(w) { var L = curL(); if (!L) return; var cx = L.x + L.w / 2, cy = L.y + hOf(L) / 2; L.w = w; clampL(L); L.x = cx - L.w / 2; L.y = cy - hOf(L) / 2; L.touched = true; render(); }
   $("size").oninput = function () { resize(parseFloat(this.value) / 100); };
-  $("minus").onclick = function () { var it = cur(); if (it) resize(it.w - 0.005); };
-  $("plus").onclick = function () { var it = cur(); if (it) resize(it.w + 0.005); };
-  document.querySelectorAll("#pad button").forEach(function (b) {
-    b.onclick = function () {
-      var it = cur(); if (!it) return;
-      var p = b.getAttribute("data-p").split(","), mx = MARGIN_X, my = MARGIN_X * AR, h = hOf(it);
-      it.x = [mx, (1 - it.w) / 2, 1 - it.w - mx][+p[0]]; it.y = [my, (1 - h) / 2, 1 - h - my][+p[1]]; layout();
-    };
-  });
-  document.querySelectorAll("button[data-n]").forEach(function (b) {
-    b.onclick = function () { var it = cur(); if (!it) return; var d = b.getAttribute("data-n").split(",");
-                              it.x += (+d[0]) * 0.0025; it.y += (+d[1]) * 0.0025 * AR; layout(); };
-  });
+  $("minus").onclick = function () { var L = curL(); if (L) resize(L.w - 0.005); };
+  $("plus").onclick = function () { var L = curL(); if (L) resize(L.w + 0.005); };
+  each("#pad button", function (b) { b.onclick = function () {
+    var L = curL(); if (!L) return; var p = b.getAttribute("data-p").split(","), mx = MARGIN_X, my = MARGIN_X * AR, h = hOf(L);
+    L.x = [mx, (1 - L.w) / 2, 1 - L.w - mx][+p[0]]; L.y = [my, (1 - h) / 2, 1 - h - my][+p[1]]; L.touched = true; render(); }; });
+  each("button[data-n]", function (b) { b.onclick = function () { var L = curL(); if (!L) return; var d = b.getAttribute("data-n").split(",");
+    L.x += (+d[0]) * 0.0025; L.y += (+d[1]) * 0.0025 * AR; L.touched = true; render(); }; });
 
-  // ---- the time the logo appears ----
-  function setT(t) { startT = Math.max(0, Math.min(T_MAX, Math.round(t))); layout(); }
-  document.querySelectorAll("#tchips button").forEach(function (b) { b.onclick = function () { setT(+b.getAttribute("data-t")); }; });
-  $("tminus").onclick = function () { setT(startT - 5); };
-  $("tplus").onclick = function () { setT(startT + 5); };
-
-  // ---- reset / save ----
-  $("reset").onclick = function () {
-    items.forEach(function (it) { if (!it.start) return; it.x = it.start.x; it.y = it.start.y; it.w = it.start.w; it.on = it.start.on; it.box.checked = it.on; });
-    startT = start0; pickOn(); layout();
-  };
-  function result() {
-    return { k: "logo_place", v: 2, start: startT, logos: items.filter(function (it) { return it.ready; }).map(function (it) {
-      return { n: it.n, on: !!it.on, x: +it.x.toFixed(4), y: +it.y.toFixed(4), w: +it.w.toFixed(4) }; }) };
+  // ---------------------------------------------------------------- caption
+  function fontOf(id) { for (var i = 0; i < FONTS.length; i++) if (FONTS[i].id === id) return FONTS[i]; return FONTS[0]; }
+  function colorOf(id) { for (var i = 0; i < COLORS.length; i++) if (COLORS[i].id === id) return COLORS[i]; return COLORS[0]; }
+  function buildCaptionUI() {
+    $("fonts").innerHTML = ""; $("colors").innerHTML = "";
+    FONTS.forEach(function (f) {
+      var d = document.createElement("button"); d.type = "button"; d.className = "font"; d.setAttribute("data-f", f.id);
+      d.innerHTML = "<b></b><small></small>"; d.firstChild.textContent = "Bidhaan"; d.firstChild.style.fontFamily = f.css; d.lastChild.textContent = f.label;
+      d.onclick = function () { st().cap.font = f.id; render(); };
+      $("fonts").appendChild(d);
+    });
+    COLORS.forEach(function (c) {
+      var d = document.createElement("button"); d.type = "button"; d.className = "swatch"; d.style.background = c.css; d.setAttribute("data-c", c.id); d.setAttribute("aria-label", c.id);
+      d.onclick = function () { st().cap.color = c.id; render(); };
+      $("colors").appendChild(d);
+    });
   }
-  window.__result = result;                                           // read by the tests
+  $("ctext").oninput = function () { st().cap.text = this.value; render(true); };
+  $("csize").oninput = function () { st().cap.size = parseFloat(this.value) / 100; render(); };
+  $("cminus").onclick = function () { st().cap.size = clampN(st().cap.size - 0.001, 0.008, 0.06); render(); };
+  $("cplus").onclick = function () { st().cap.size = clampN(st().cap.size + 0.001, 0.008, 0.06); render(); };
+  $("cspeed").oninput = function () { st().cap.seconds = parseInt(this.value, 10); render(); };
+  each("#cmode button", function (b) { b.onclick = function () {
+    var c = st().cap;
+    if (b.getAttribute("data-m") === "count") { c.times = []; if (!c.count) c.count = 8; render(); }
+    else { if (!c.times.length) c.times = [300, 900, 1800].filter(function (t) { return t < LEN; }); tab("time"); } }; });
+  $("nminus").onclick = function () { st().cap.count = clampN((st().cap.count || 8) - 1, 1, 40); render(); };
+  $("nplus").onclick = function () { st().cap.count = clampN((st().cap.count || 8) + 1, 1, 40); render(); };
+  $("play").onclick = function () { var c = $("cap"); c.className = ""; void c.offsetWidth; c.style.setProperty("--crawl", Math.min(8, st().cap.seconds) + "s"); c.className = "play"; };
+  $("cap").addEventListener("animationend", function () { this.className = ""; });
+
+  // ---------------------------------------------------------------- timeline
+  function buildLens() {
+    $("lens").innerHTML = "";
+    LENS.forEach(function (L) { var b = document.createElement("button"); b.type = "button"; b.textContent = L < 3600 ? (L / 60) + " min" : (L / 3600) + " h"; b.setAttribute("data-l", L);
+      b.onclick = function () { LEN = L; render(); }; $("lens").appendChild(b); });
+  }
+  function xOf(t) { return clampN(t / LEN, 0, 1) * 100; }
+  function tAt(clientX) { var r = $("track").getBoundingClientRect(); return clampN((clientX - r.left) / r.width, 0, 1) * LEN; }
+  function roundT(t) { var step = LEN <= 3600 ? 5 : 15; return Math.round(t / step) * step; }
+  var tdrag = null;
+  function drawTrack() {
+    var tr = $("track"), s_ = st(); tr.innerHTML = "";
+    var stepT = LEN <= 1800 ? 300 : LEN <= 5400 ? 900 : 1800;
+    for (var t = 0; t < LEN; t += stepT) { var d = document.createElement("div"); d.className = "tick"; d.style.left = xOf(t) + "%"; d.innerHTML = "<span></span>"; d.firstChild.textContent = hms(t).replace(/:00$/, ""); tr.appendChild(d); }
+    var z = document.createElement("div"); z.className = "zone"; z.style.left = xOf(s_.start) + "%"; z.style.right = "0"; tr.appendChild(z);
+    if (s_.trim.mode !== "off" && cur !== "dub") {
+      var a = s_.trim.a, b = s_.trim.b;
+      var cuts = s_.trim.mode === "head" ? [[0, a]] : s_.trim.mode === "tail" ? [[LEN - a, LEN]] : s_.trim.mode === "cut" ? [[a, b]] : [[0, a], [b, LEN]];
+      cuts.forEach(function (c) { if (c[1] <= c[0]) return; var q = document.createElement("div"); q.className = "zone cut"; q.style.left = xOf(c[0]) + "%"; q.style.width = (xOf(c[1]) - xOf(c[0])) + "%"; tr.appendChild(q); });
+    }
+    var lm = document.createElement("div"); lm.className = "mark logo"; lm.textContent = "logo"; lm.style.left = clampN(xOf(s_.start), 6, 94) + "%"; lm.setAttribute("data-k", "logo"); tr.appendChild(lm);
+    s_.cap.times.forEach(function (t2, i) { var m = document.createElement("div"); m.className = "mark" + (i === selT ? " sel" : ""); m.textContent = String(i + 1); m.style.left = xOf(t2) + "%"; m.setAttribute("data-i", i); tr.appendChild(m); });
+  }
+  $("track").addEventListener("pointerdown", function (e) {
+    var k = e.target.getAttribute && e.target.getAttribute("data-k"), i = e.target.getAttribute && e.target.getAttribute("data-i");
+    if (k === "logo") tdrag = { kind: "logo" };
+    else if (i !== null && i !== undefined) { selT = +i; tdrag = { kind: "cap", v: st().cap.times[+i] }; }
+    else { var t = roundT(tAt(e.clientX)), c = st().cap; if (c.times.length >= MAX_TIMES) { toast(MAX_TIMES + " caption times is the most"); return; }
+           if (c.times.indexOf(t) < 0) { c.times.push(t); c.times.sort(function (a, b) { return a - b; }); } selT = c.times.indexOf(t); tdrag = { kind: "cap", v: t }; }
+    try { $("track").setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault(); render();
+  });
+  $("track").addEventListener("pointermove", function (e) {
+    if (!tdrag) return; var t = roundT(tAt(e.clientX));
+    if (tdrag.kind === "logo") st().start = clampN(t, 0, T_MAX);
+    else { var c = st().cap, i = c.times.indexOf(tdrag.v); if (i < 0) return; if (c.times.indexOf(t) >= 0 && t !== tdrag.v) return;
+           c.times[i] = t; tdrag.v = t; c.times.sort(function (a, b) { return a - b; }); selT = c.times.indexOf(t); }
+    render();
+  });
+  function tend() { tdrag = null; render(); }
+  $("track").addEventListener("pointerup", tend); $("track").addEventListener("pointercancel", tend);
+  function addTime(t) { var c = st().cap; if (c.times.length >= MAX_TIMES) { toast(MAX_TIMES + " caption times is the most"); return; }
+    t = clampN(Math.round(t), 0, T_MAX); if (c.times.indexOf(t) < 0) { c.times.push(t); c.times.sort(function (a, b) { return a - b; }); } selT = c.times.indexOf(t);
+    if (t > LEN) LEN = LENS.filter(function (L) { return L >= t; })[0] || LENS[LENS.length - 1]; render(); }
+  window.__addTime = addTime;
+  $("tadd").onclick = function () { var v = prompt("Caption time: minutes (12), or m:ss (12:30), or h:mm:ss", "10"); if (v === null) return; var t = parseT(v);
+    if (t === null) { toast("Could not read that time"); return; } if (v.indexOf(":") < 0) t *= 60; addTime(t); };
+  $("tclear").onclick = function () { st().cap.times = []; selT = -1; if (!st().cap.count) st().cap.count = 8; render(); };
+  each("#tchips button", function (b) { b.onclick = function () { st().start = +b.getAttribute("data-t"); render(); }; });
+  // time fields (logo start, trim a / b): - / + and tap-to-type
+  function tget(k) { return k === "start" ? st().start : k === "ta" ? st().trim.a : st().trim.b; }
+  function tset(k, v) { v = clampN(Math.round(v), 0, T_MAX); if (k === "start") st().start = v; else if (k === "ta") st().trim.a = v; else st().trim.b = v; render(); }
+  window.__tset = tset;
+  each("button[data-tf]", function (b) { b.onclick = function () { var p = b.getAttribute("data-tf").split(","); tset(p[0], tget(p[0]) + (+p[1])); }; });
+  each("output[data-edit]", function (o) { o.onclick = function () { var k = o.getAttribute("data-edit"), v = prompt("Time: seconds (90), or m:ss (1:30), or h:mm:ss", hms(tget(k))); if (v === null) return;
+    var t = parseT(v); if (t === null) { toast("Could not read that time"); return; } tset(k, t); }; });
+
+  // ---------------------------------------------------------------- trim
+  each("#tmode button", function (b) { b.onclick = function () { if (cur === "dub") return; var tr = st().trim; tr.mode = b.getAttribute("data-m");
+    if ((tr.mode === "range" || tr.mode === "cut") && tr.b <= tr.a) tr.b = tr.a + 60; render(); }; });
+
+  // ---------------------------------------------------------------- tabs, sets
+  function tab(name) { each("#tabs button", function (b) { b.className = b.getAttribute("data-tab") === name ? "on" : ""; });
+    each(".pane", function (p) { p.className = "pane" + (p.id === "p-" + name ? " on" : ""); }); render(); }
+  each("#tabs button", function (b) { b.onclick = function () { tab(b.getAttribute("data-tab")); }; });
+  function useSet(name) { if (!S[name] || name === cur) return; cur = name; sel = -1; selT = -1; buildLogos(); render(); }
+  each("#sets button", function (b) { b.onclick = function () { useSet(b.getAttribute("data-set")); }; });
+
+  // ---------------------------------------------------------------- render
+  function render(keepText) {
+    if (!S[cur]) return;
+    var s_ = st();
+    s_.logos.forEach(function (L, i) {
+      if (!L.ready || !L.el) return; clampL(L);
+      L.el.style.left = (L.x * 100) + "%"; L.el.style.top = (L.y * 100) + "%"; L.el.style.width = (L.w * 100) + "%";
+      L.el.className = "lg" + (i === sel ? " sel" : "") + (L.on ? "" : " off");
+      L.row.className = "logo-row" + (i === sel ? " sel" : "");
+      L.sub.textContent = L.on ? "left " + pct(L.x) + " · top " + pct(L.y) + " · size " + pct(L.w) : "switched off";
+    });
+    var L = curL();
+    $("rx").textContent = L ? pct(L.x) : "–"; $("ry").textContent = L ? pct(L.y) : "–"; $("rw").textContent = L ? pct(L.w) : "–";
+    if (L) $("size").value = (L.w * 100).toFixed(1);
+    // caption
+    var c = s_.cap, cap = $("cap"), sh = stage.getBoundingClientRect().height;
+    cap.textContent = c.text.replace(/\s+/g, " ").trim(); cap.style.fontFamily = fontOf(c.font).css; cap.style.color = colorOf(c.color).css;
+    cap.style.fontSize = Math.max(5, sh * c.size) + "px";
+    if (!keepText) $("ctext").value = c.text;
+    each("#fonts .font", function (d) { d.className = "font" + (d.getAttribute("data-f") === fontOf(c.font).id ? " on" : ""); });
+    each("#colors .swatch", function (d) { d.className = "swatch" + (d.getAttribute("data-c") === colorOf(c.color).id ? " on" : ""); });
+    $("csize").value = (c.size * 100).toFixed(1); $("csizev").textContent = (c.size * 100).toFixed(1) + " %  (" + Math.round(1080 * c.size) + " px on a 1080p film)";
+    $("cspeed").value = c.seconds; $("cspeedv").textContent = c.seconds + " s";
+    var exact = c.times.length > 0;
+    each("#cmode button", function (b) { b.className = (b.getAttribute("data-m") === "times") === exact ? "on" : ""; });
+    $("ccount").style.display = exact ? "none" : "flex"; $("ctimes").style.display = exact ? "block" : "none"; $("nval").textContent = c.count || 8;
+    $("play").disabled = !cap.textContent;
+    // timeline
+    each("#lens button", function (b) { b.className = +b.getAttribute("data-l") === LEN ? "on" : ""; });
+    drawTrack();
+    each("#tchips button", function (b) { b.className = +b.getAttribute("data-t") === s_.start ? "on" : ""; });
+    $("tf-start").textContent = hms(s_.start);
+    $("tcount").textContent = exact ? "(" + c.times.length + ")" : "(none: spread over the film, " + (c.count || 8) + " times)";
+    var box = $("times"); box.innerHTML = "";
+    c.times.forEach(function (t, i) { var d = document.createElement("span"); d.className = "tchip" + (i === selT ? " sel" : ""); d.textContent = (i + 1) + " · " + hms(t) + " ";
+      var x = document.createElement("button"); x.type = "button"; x.textContent = "×"; x.setAttribute("aria-label", "remove " + hms(t));
+      x.onclick = function (e) { e.stopPropagation(); c.times.splice(i, 1); selT = -1; if (!c.times.length && !c.count) c.count = 8; render(); };
+      d.onclick = function () { selT = i; render(); }; d.appendChild(x); box.appendChild(d); });
+    // trim
+    var tr = s_.trim, dub = cur === "dub";
+    $("trimnote").textContent = dub ? "Dub-sync films are not trimmed: the film follows the Somali copy from its first second to its last. Trim belongs to banner jobs."
+                                    : "Cuts the video before the logo and the caption are added. Shown in red on the timeline.";
+    each("#tmode button", function (b) { b.className = b.getAttribute("data-m") === (dub ? "off" : tr.mode) ? "on" : ""; b.disabled = dub; });
+    var two = tr.mode === "range" || tr.mode === "cut", any = tr.mode !== "off" && !dub;
+    $("trima").style.display = any ? "block" : "none"; $("trimb").style.display = any && two ? "block" : "none";
+    $("trimal").textContent = tr.mode === "head" ? "Cut this much from the start" : tr.mode === "tail" ? "Cut this much from the end" : tr.mode === "range" ? "Keep from" : "Cut from";
+    $("trimbl").textContent = tr.mode === "range" ? "Keep until" : "Cut until";
+    $("tf-ta").textContent = hms(tr.a); $("tf-tb").textContent = hms(tr.b);
+    // which set, what changed
+    each("#sets button", function (b) { var n = b.getAttribute("data-set"); b.className = (n === cur ? "on" : "") + (S[n] && diff(n) ? " changed" : ""); b.style.display = S[n] ? "" : "none"; });
+    $("save").textContent = result() ? "Save" : "Nothing to save";
+  }
+
+  // ---------------------------------------------------------------- reset / save
+  $("reset").onclick = function () { if (!C) return; S[cur] = norm(C.sets[cur]); sel = -1; selT = -1; buildLogos(); render(); toast("Back to what is saved"); };
   $("save").onclick = function () {
     var r = result();
-    if (tg && tg.sendData) { try { if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success"); } catch (e) {} tg.sendData(JSON.stringify(r)); return; }
-    $("out").style.display = "block";
-    $("cmd").textContent = r.logos.filter(function (l) { return l.on; }).map(function (l) {
-      return "/logoset " + l.n + " " + (l.x * 100).toFixed(1) + " " + (l.y * 100).toFixed(1) + " " + (l.w * 100).toFixed(1); }).concat(["/logoat " + r.start + "s"]).join("\n");
-    $("out").scrollIntoView({ block: "center" });
+    if (!r) { toast("Nothing was changed"); return; }
+    if (r.sets.banner && r.sets.banner.trim) { var t = r.sets.banner.trim; if ((t.mode === "range" || t.mode === "cut") && t.b <= t.a) { toast("Trim: the end must be after the start"); tab("trim"); return; } }
+    var js = JSON.stringify(r);
+    if (unescape(encodeURIComponent(js)).length > 3900) { toast("Too many changes at once: save one set first"); return; }
+    if (tg && tg.sendData) { try { if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success"); } catch (e) {} tg.sendData(js); return; }
+    $("out").style.display = "block"; $("cmd").textContent = js; $("out").scrollIntoView({ block: "center" });
   };
-  window.addEventListener("resize", layout);
-  layout();
+
+  // ---------------------------------------------------------------- start
+  function boot(cfg) {
+    C = cfg;
+    if (cfg.fonts && cfg.fonts.length) {
+      FONTS = cfg.fonts.map(function (f) { return { id: f.id, label: f.label, css: f.file ? "'cap-" + (f.id || "classic") + "', sans-serif" : "sans-serif", file: f.file }; });
+      FONTS.forEach(function (f) { if (!f.file || !window.FontFace) return;
+        try { var ff = new FontFace("cap-" + (f.id || "classic"), "url(" + f.file + ")"); ff.load().then(function (x) { document.fonts.add(x); render(true); }, function () {}); } catch (e) {} });
+    }
+    if (cfg.colors && cfg.colors.length) COLORS = cfg.colors;
+    ["banner", "dub"].forEach(function (n) { if (cfg.sets && cfg.sets[n]) S[n] = norm(cfg.sets[n]); });
+    cur = (cfg.active === "dub" && S.dub) ? "dub" : (S.banner ? "banner" : "dub");
+    if (cfg.dur > 0) LEN = LENS.filter(function (L) { return L >= cfg.dur; })[0] || LENS[LENS.length - 1];
+    if (cfg.bg) { var bg = new Image(); bg.onload = function () { stage.style.backgroundImage = "url('" + cfg.bg + "')"; $("shapes").style.display = "none"; setShape(bg.naturalWidth / bg.naturalHeight); }; bg.src = cfg.bg; }
+    buildCaptionUI(); buildLens(); buildLogos(); render();
+    if (!tg) $("out").style.display = "block";
+  }
+  window.addEventListener("resize", function () { render(true); });
+  function dead(msg) { $("wrap").innerHTML = '<div class="card">' + msg + "</div>"; each(".bar", function (b) { b.style.display = "none"; }); }
+  var tok = new URLSearchParams(location.search).get("t");
+  if (window.__TEST_CFG) boot(window.__TEST_CFG);
+  else if (tok && /^[A-Za-z0-9_-]{8,64}$/.test(tok)) {
+    fetch("t/" + tok + "/cfg.json", { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(boot).catch(function () { dead("This Studio link is no longer valid. Open it again from the bot with /studio."); });
+  } else dead("Open the Studio from the bot with /studio.");
 })();
 </script>
 </body>

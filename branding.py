@@ -25,6 +25,56 @@ log = logging.getLogger("branding")
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
+# bot31 (John 2026-10-05: "different fonts"): the caption's font is chosen BY ID, its colour from a list. The files
+# live in assets/fonts (Debian's own font packages: Montserrat, Roboto, Open Sans, Lato, Bebas Neue; DejaVu is
+# the system's). "" / an unknown id / a missing file = the font of before.
+FONT_DIRS = ("/app/assets/fonts", "/opt/Bidhanlogoedit/assets/fonts")
+CAPTION_FONTS = {
+    "classic": ("Classic", ""),
+    "montserrat": ("Montserrat", "Montserrat-ExtraBold.ttf"),
+    "roboto": ("Roboto", "Roboto-Bold.ttf"),
+    "condensed": ("Condensed", "RobotoCondensed-Bold.ttf"),
+    "opensans": ("Open Sans", "OpenSans-Bold.ttf"),
+    "lato": ("Lato", "Lato-Black.ttf"),
+    "bebas": ("Bebas", "BebasNeue-Bold.otf"),
+    "serif": ("Serif", "DejaVuSerif-Bold.ttf"),
+}
+CAPTION_COLORS = {"white": "white", "yellow": "0xFFD60A", "gold": "0xFFC107", "cyan": "0x4DD0E1",
+                  "green": "0x69F0AE", "pink": "0xFF4F9A", "red": "0xFF5252", "orange": "0xFF9F0A"}
+
+
+def caption_font_file(font_id) -> str:
+    """The font file for an id of CAPTION_FONTS; the default font for anything else or a file that is not there."""
+    try:
+        name = CAPTION_FONTS.get(str(font_id or "").strip().lower(), ("", ""))[1]
+        if name:
+            for d in FONT_DIRS:
+                p = os.path.join(d, name)
+                if os.path.isfile(p):
+                    return p
+    except Exception:
+        pass
+    return FONT
+
+
+def caption_color(v) -> str:
+    """The ffmpeg colour for a name of CAPTION_COLORS; white for anything else."""
+    try:
+        return CAPTION_COLORS.get(str(v or "").strip().lower(), "white")
+    except Exception:
+        return "white"
+
+
+def caption_text_arg(text) -> tuple:
+    """(extra drawtext option, the escaped text) for a caption. A text with a % or a backslash in it made drawtext
+    stop with "Stray %" and draw NOTHING ("50% OFF" never showed): such a text is drawn with expansion=none --
+    letter for letter. Every other text: the option and the escaping of before, character for character."""
+    t = str(text or "")
+    if "%" in t or "\\" in t:
+        return "expansion=none:", t.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\u2019")
+    return "", _esc_text(t)
+
+
 CORNERS = {
     "TL": "top-left",
     "TR": "top-right",
@@ -52,6 +102,8 @@ class RenderConfig:
     scroll_times: list[float] = field(default_factory=list)  # exact start secs;
     #                              if set, overrides scroll_count
     caption_scale: float = 0.023   # caption font height as fraction of output h
+    caption_font: str = ""         # an id of CAPTION_FONTS ("" = the classic font)
+    caption_color: str = "white"   # a name of CAPTION_COLORS
     # per-element start times (seconds) — appear only after these (skip an intro)
     logo_start: float = 0.0
     cover_start: float = 0.0
@@ -232,7 +284,9 @@ def build_filter(src_w: int, src_h: int, duration: float,
         parts.append(f"[{cur}]null[outv]")
         return ";".join(parts)
     T = max(2.0, cfg.scroll_seconds)
-    base = (f"drawtext=fontfile={FONT}:text='{txt}':fontcolor=white:"
+    _cap_xp, _cap_txt = caption_text_arg(cfg.scroll_text)
+    base = (f"drawtext=fontfile={caption_font_file(cfg.caption_font)}:{_cap_xp}text='{_cap_txt}':"
+            f"fontcolor={caption_color(cfg.caption_color)}:"
             f"fontsize={fontsize}:borderw=2:bordercolor=black@0.9:x=(w-text_w)/2")
     if cfg.scroll_times:
         # EXACT minute marks the user chose: one pass at each time.

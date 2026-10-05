@@ -1,5 +1,31 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-05 (morning) -- bot30 + bot31 LIVE 08:00: THE STUDIO (logo, caption with fonts and colours, timeline, trim) and TWO SETS of settings
+
+John: "not only the logo, I also want caption in there ... different fonts, more like studio, timeline ... the cut,
+trim, caption, everything" and "banner and dub sync will be totally different, independent, so my settings of dub
+sync stay the way they are".
+- **bot30, two sets of settings per user:** the record itself = BANNER jobs; "_dub" beside it = DUB-SYNC films, born
+  at the bot's start as a copy of the settings as they were (2 users migrated; every stored value kept -- checked
+  against the backup), independent from then on; the uploaded logo image is shared. user_cfg(uid, profile) /
+  set_user(uid, _profile=...): renders read their own set explicitly, a panel edits the set of the flow it is in.
+- **bot31, the caption's look:** 8 fonts chosen BY ID (files in assets/fonts, from Debian's own font packages) and 8
+  colours BY NAME; a font that is missing or a name that is not on the list = the classic white caption (a render
+  never fails over a font). With the defaults every render filter is the one of before, character for character.
+  FOUND on the way: a caption with a % in it was never drawn ("Stray %": drawtext stopped) -- fixed
+  (branding.caption_text_arg). The engine's brand.py draws the same font and colour on dub-sync films.
+- **bot31, the Studio** (/studio, /logopos, the button in Settings -> Logos): web_public/place.html v3 -- a switch
+  Banner jobs / Dub-sync films, a preview that stays in view, tabs Logo / Caption / Timeline / Trim; it reads its data
+  from a file in its own folder (t/<token>/cfg.json: both sets, fonts, colours) and sends back only what changed
+  (cleaned on arrival: known names, clamped numbers, at most 40 caption times). Trim is a banner-job setting.
+- Proof: test_bot_profiles30 25/25, test_bot_capfont31 20/20 (real ffmpeg: a yellow Montserrat caption is yellow),
+  test_bot_studio31 34/34, test_engine_capfont 8/8, run_suites31.sh (12 suites the same on the live and the new
+  copy; cutsummary and contract fail on BOTH, as in the suites of bot27-29: their fixtures moved on), every
+  earlier test (22-28) passes on the new copy. tools/e2e_studio31.py through Telegram from John's account: page
+  200, cfg.json 200, 3 logo images + 8 fonts 200 (no folder listing), an empty save -> "Nothing was changed.", a
+  save of the dub-sync caption with its CURRENT values -> "Studio saved", stored settings before / after EQUAL (80
+  values). The real page looked at on a phone-sized screen.
+
 ## 2026-10-05 (night) -- bot29 LIVE 02:13 (+29b 02:16): the Logo studio (the logo anywhere, its size, its switch, its start time)
 
 John: "is there a way, like a browser, that allows me to put my logo any position I want ... make it small,
