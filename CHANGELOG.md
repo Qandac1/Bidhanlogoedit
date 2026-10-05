@@ -1,5 +1,36 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-05 (afternoon) -- bot33 LIVE 15:00 + bot34 LIVE 15:36: /trailer, THE FAST WAY (no subtitles of the film, no questions)
+
+John, after the Jigarthanda test: "let's see how the Agent 2023 trailer goes, let's test if the bot handles that
+movie".
+- **bot33 (trailer_flow.py):** after the Somali film ONE optional step -- "send the same film with the trailer's own
+  language (the HD master with its original sound), or Skip". With it the engine (`trailer_dub.py build --orig`)
+  finds each line by its SOUND in that film, and by its WORDS when the file carries English subtitles (new engine
+  step of the same day, see /opt/dubsync2/CHANGELOG.md), then takes the same moment from the Somali film. A live
+  panel; the trailer comes with a plain count ("19 of the trailer's 29 lines (11 by their sound, 7 by their words,
+  1 by the picture)") and the times of the lines that stayed original. Nothing found, or fewer than 3 lines /
+  25 %: stopped at once, with a button "The long way with these files". Skip (or subtitles sent straight away) =
+  the flow of before, prompt for prompt; _run, _auto, _question, _finish, _Panel are untouched (source compared).
+- **REAL RUN through Telegram from John's account** (tools/e2e_trailer_fast.py bot:59783 bot:59784 saved:63675):
+  Agent 2023 trailer + Somali film + his Telugu file, "No subtitles" -> the Somali trailer delivered in 30 min
+  (14 of them downloading 3.2 GB), msg 63723. The delivered file itself (engine tools/trailer_out_check.py):
+  picture md5 identical to the official trailer, same length, level as the source, no Somali line heard as Telugu.
+- **bot34, found by the first attempt of that run:** 24 s after the bot's restart Telegram refused the edit of the
+  /trailer prompt (MESSAGE_ID_INVALID); the exception left the intake before stop_propagation and the trailer, the
+  Somali film and the Telugu film fell through to the LOGO flow ("3 videos queued"; cleared with /cancel, nothing
+  was rendered). The same hole was in the flow of before bot33. Now `_show()` sends the step as a NEW message when
+  an edit is refused and the intake goes on with it, and `_take()` is a guard around the steps: whatever fails,
+  the file stays with /trailer and the user is told to send it again. Also: the finding stage is expected to take
+  15 min (its real length on films the engine sees for the first time), not 7.
+- Proof: test_trailer_fast33.py 23/23 and test_trailer_guard34.py 10/10 inside the container (before: the film
+  falls through; after: it stays), the bot33 suite again on the bot34 file; after the bot34 restart a real
+  /trailer + one file + Cancel through Telegram (tools/e2e_trailer_prompt.py --with-file): "Trailer received",
+  nothing in the logo flow.
+- Not 95 % for Agent yet: 10 lines stay original -- their automatic English is too rough to find them in the film's
+  subtitles (an English subtitle file of the TRAILER lifts that), a few are not speech. The same build twice can
+  differ by one borderline line (the voice separation's random shift): fixed next in the engine.
+
 ## 2026-10-05 (morning) -- bot30 + bot31 LIVE 08:00: THE STUDIO (logo, caption with fonts and colours, timeline, trim) and TWO SETS of settings
 
 John: "not only the logo, I also want caption in there ... different fonts, more like studio, timeline ... the cut,
