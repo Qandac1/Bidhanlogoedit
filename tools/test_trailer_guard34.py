@@ -126,7 +126,10 @@ async def main():
         out = []
         for m in (Msg(video=F("trailer.mp4")), Msg(video=F("somali.mp4")), Msg(video=F("own.mkv")), Msg(document=F("t.srt", 900, "text/plain"))):
             out.append(await send(mod, m))
-        seq[name] = (out, [(t, [[(b.text, b.callback_data) for b in row] for row in k.inline_keyboard]) for t, k in pr.edits], len(started))
+        # (a later bot may add one sentence to the step-2 prompt -- bot35: "If this trailer already exists in Somali ..."
+        #  -- the steps, their order and their buttons are what this check is about)
+        seq[name] = (out, [(t.split("\nIf this trailer already exists")[0], [[(b.text, b.callback_data) for b in row] for row in k.inline_keyboard])
+                           for t, k in pr.edits], len(started))
         mod._intake.pop(UID, None)
     check("B: a normal intake is the one of before, prompt for prompt and button for button (%d edits)" % len(seq["after"][1]),
           seq["before"][:2] == seq["after"][:2] and seq["after"][0] == ["stopped"] * 4 and len(seq["after"][1]) == 3, seq)
@@ -156,7 +159,10 @@ async def main():
     same = [n for n in names if hasattr(T, n) and inspect.getsource(getattr(TB, n)) == inspect.getsource(getattr(T, n))]
     diff = [n for n in names if n not in same]
     new = sorted(n for n, f in inspect.getmembers(T, inspect.isfunction) if f.__module__ == T.__name__ and n not in names)
-    check("E: of the %d functions of before only _take differs; new: %s" % (len(names), new), diff == ["_take"] and new == ["_show", "_take_step"], (diff, new))
+    later = sorted(set(diff) - {"_take"}) + sorted(set(new) - {"_show", "_take_step"})
+    check("E: of the %d functions of before _take differs, _show and _take_step are new%s"
+          % (len(names), (" (a later bot's own changes, checked by its own test: %s)" % later) if later else ""),
+          "_take" in diff and {"_show", "_take_step"} <= set(new) and set(diff) <= {"_take", "_start"}, (diff, new))
     cls_same = inspect.getsource(TB._Panel) == inspect.getsource(T._Panel)
     check("E: the panel class is untouched", cls_same)
     print("TRAILERGUARD34_TESTS " + ("ALL PASS" if ok else "FAILED"))

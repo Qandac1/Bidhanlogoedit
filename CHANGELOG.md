@@ -1,5 +1,27 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-05 (evening) -- bot35 LIVE 19:06: /trailer -- when the Somali trailer already exists, its REAL sound is the result
+
+John, after the trailers built from the film: "you were creating your own fake, you didn't nail the dialogue as it is
+supposed to be ... I sent you the Agent Somali trailer that has already been created, this is the proof".
+- **Measured, not argued** (engine tools/trailer_ref_truth.py): the channel voiced that trailer SEPARATELY. None of
+  its 24 spoken pieces is in the Somali film's sound (only the song at the end is); the same search on my own
+  film-built trailer finds 13 pieces. So a trailer built from the film can never say those words -- two different
+  Somali recordings, not "literal vs localized" translation.
+- **bot35 (trailer_flow.py):** step 2 of /trailer ("send the Somali film") also takes the trailer's own Somali
+  version -- the bot decides by itself: a second video about as long as the trailer (within 20 s or a quarter of
+  its length) is that version. Then `_run_swap`: the engine's new `trailer_dub.py swap` puts the Somali version's
+  own sound on the clean official picture (offset by the picture, then exactly by the shared music; the picture
+  stream-copied) and the result is sent with a plain caption. A pair the engine refuses (another picture, another
+  cut, another speed) sends nothing, says why, and the intake is back at step 2 with the trailer kept ("send the
+  Somali FILM"). A long second video (the film) is the flow of before, prompt for prompt.
+- **REAL RUN through Telegram from John's account** (tools/e2e_trailer_swap.py bot:59783 saved:63756): the result
+  delivered in 47 s (msg 63765). The delivered file: picture md5 = the official trailer's; sound = the Somali
+  trailer's (the same as the hand-built file sent to him at 18:55), from 0, as long as the picture.
+- Proof: test_trailer_swap35.py 16/16 inside the container, and the bot34 + bot33 suites on the bot35 file.
+- Known, not changed here: the trailer flow sends its videos without a length / thumbnail in the message (all three
+  ways, since the feature began).
+
 ## 2026-10-05 (afternoon) -- bot33 LIVE 15:00 + bot34 LIVE 15:36: /trailer, THE FAST WAY (no subtitles of the film, no questions)
 
 John, after the Jigarthanda test: "let's see how the Agent 2023 trailer goes, let's test if the bot handles that
