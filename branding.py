@@ -151,11 +151,36 @@ def _corner_xy(corner: str, mx: int, my: int) -> str:
     }.get(corner, f"W-w-{mx}:{my}")
 
 
+# bot28 (John 2026-10-04: "NOT cropped, stretched, or zoomed to fill the 16:9 frame"): a source whose shape is not
+# the frame's is fitted into the frame with black bars -- the plain scale below stretched a 2.39:1 picture x1.34.
+FIT_ON = os.environ.get("BIDHAAN_FIT", "1") != "0"
+FIT_TOL = 0.02          # shapes within 2 % of each other: the scale of before (1280x718 into 1280x720)
+
+
+def _fit_rect(src_w: int, src_h: int, out_w: int, out_h: int):
+    """(x, y, w, h) of the picture fitted inside the out frame (even sizes, centred), or None when the plain
+    scale of before applies: the same shape (within FIT_TOL), unusable sizes, the switch off. Never raises."""
+    try:
+        if not FIT_ON or min(src_w, src_h, out_w, out_h) <= 0:
+            return None
+        if abs((src_w * out_h) / float(src_h * out_w) - 1.0) <= FIT_TOL:
+            return None
+        k = min(out_w / float(src_w), out_h / float(src_h))
+        w = min(out_w, max(2, int(round(src_w * k / 2.0)) * 2))
+        h = min(out_h, max(2, int(round(src_h * k / 2.0)) * 2))
+        return (out_w - w) // 2, (out_h - h) // 2, w, h
+    except Exception:
+        return None
+
+
 # ----------------------------------------------------------------- filter
 def build_filter(src_w: int, src_h: int, duration: float,
                  events: list[CoverEvent], cfg: RenderConfig) -> str:
     out_w = cfg.width or src_w
     out_h = cfg.height or src_h
+    _fit = _fit_rect(src_w, src_h, out_w, out_h)
+    # the picture's own place inside the frame: covers and logos are put on IT (the whole frame when not fitted)
+    _px, _py, _pw, _ph = _fit if _fit else (0, 0, out_w, out_h)
     margin = max(8, int(out_w * 0.015))
     fontsize = max(14, int(out_h * cfg.caption_scale))
     S_logo = max(0.0, cfg.logo_start)
@@ -167,6 +192,8 @@ def build_filter(src_w: int, src_h: int, duration: float,
     # skip the scale entirely when output == source (saves a full rescale pass)
     if out_w == src_w and out_h == src_h:
         parts: list[str] = ["[0:v]setsar=1[base]"]
+    elif _fit:
+        parts = ["[0:v]scale=%d:%d,pad=%d:%d:%d:%d:black,setsar=1[base]" % (_pw, _ph, out_w, out_h, _px, _py)]
     else:
         parts = ["[0:v]scale=%d:%d,setsar=1[base]" % (out_w, out_h)]
 
@@ -177,9 +204,9 @@ def build_filter(src_w: int, src_h: int, duration: float,
         labels = "".join(f"[c{i}]" for i in range(n))
         parts.append(f"[1:v]split={n}{labels}" if n > 1 else "[1:v]null[c0]")
         for i, e in enumerate(events):
-            bw = max(2, int(e.w * out_w))
-            bh = max(2, int(e.h * out_h))
-            bx, by = int(e.x * out_w), int(e.y * out_h)
+            bw = max(2, int(e.w * _pw))
+            bh = max(2, int(e.h * _ph))
+            bx, by = _px + int(e.x * _pw), _py + int(e.y * _ph)
             parts.append(f"[c{i}]scale={bw}:{bh}[cs{i}]")
             parts.append(
                 f"[{cur}][cs{i}]overlay={bx}:{by}:"
@@ -189,8 +216,8 @@ def build_filter(src_w: int, src_h: int, duration: float,
     # logos — each scaled + placed at its corner with its own margins.
     for idx, lg in enumerate(cfg.logos):
         in_i = 2 + idx
-        lw = max(40, int(out_w * lg.frac))
-        mx, my = int(lg.margin_x * out_w), int(lg.margin_y * out_h)
+        lw = max(40, int(_pw * lg.frac))
+        mx, my = _px + int(lg.margin_x * _pw), _py + int(lg.margin_y * _ph)
         # format=rgba BEFORE scale keeps the alpha channel (else transparent
         # areas render as a black box).
         parts.append(f"[{in_i}:v]format=rgba,scale={lw}:-1[lg{idx}]")

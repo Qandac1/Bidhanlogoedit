@@ -1,5 +1,46 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-05 (night) -- bot29 LIVE 02:13 (+29b 02:16): the Logo studio (the logo anywhere, its size, its switch, its start time)
+
+John: "is there a way, like a browser, that allows me to put my logo any position I want ... make it small,
+large" and "about the logo time etc. build a modern thing, well designed, easy, responsive, without breaking
+anything".
+- No render code changed: a logo was already stored as corner + margins + width share; a free place is corner TL
+  with margin_x = left, margin_y = top (shares of the PICTURE). The menu only offered corners.
+- **web_public/place.html** ("Logo studio", static, phone first, two columns on a wide screen): a 16:9 screen with
+  the picture in it (black bars shown for a cinema film), drag anywhere on the picture, tap to place, magnetic
+  middle lines, 9 quick places, fine-step arrows, size slider, a switch per logo, the second the logo appears
+  (Start / 20 s / 45 s / 1 min / 2 min, +- 5 s), Reset, Save. Outside Telegram it prints the /logoset lines.
+- **patch_bot_logoplace29:** /logopos (also /studio, /place; button in Settings -> Logos) sends a keyboard button
+  that opens the page with the user's own logos (reply to a photo / video to use its picture as the frame); the
+  page's Save comes back through Telegram (web_app_data), is cleaned (known names, clamped numbers), stored, and
+  answered with the numbers and a preview made by the real render filter. /logoset [name] <left %> <top %>
+  <size %> does the same by hand. Only allowed users.
+- The page is served by Caddy: one handle_path /logo/* block (tools/caddy_logo_route.sh; static files of
+  /opt/Bidhanlogoedit/web_public, no listing; each opening gets an unguessable folder, swept after 2 h).
+- Proof: test_bot_logoplace29 31/31 (settings to a temp file; real ffmpeg: the logo lands at the chosen place),
+  run_suites29.sh (12 suites same; 'panels' differs only in an asyncio task number, 18/18 pass on both), the page
+  driven in a browser at 320 / 375 / 1280 px (no sideways scroll).
+- bot29b (02:16): the FIRST real /logopos failed -- "[Errno 30] Read-only file system": /opt/Bidhanlogoedit is
+  mounted read-only in the bot container (the unit tests used a temp folder; tools/e2e_logostudio.py caught it).
+  The per-opening folders now go to /opt/dubsync2/web_logo/t (writable), served at /logo/t/*
+  (caddy_logo_route_b.sh). End to end from John's account afterwards: /logopos -> the button, page 200, the three
+  logo images 200, the studio's Save sent back with his CURRENT numbers (no change) -> "Logo saved" + preview.
+- A logo that was off and stays off is not touched by a save; a logo switched off keeps its stored place.
+
+## 2026-10-05 (night) -- bot28 LIVE 02:02: the logo-only path fits a video into the frame, never stretches it
+
+- Found while giving the dub-sync path its black bars (bot27): branding.build_filter scaled every source to the
+  setting with a plain scale=W:H. Proven on a file (tools/probe_batch_stretch.py): a 2.39:1 picture came out
+  filling 16:9, a circle 201 px wide x 269 px high.
+- **patch_bot_fit28:** a source whose shape differs from the frame's by more than 2 % is scaled to fit and padded
+  with black; banner covers and logos are placed on the picture. Same shape / "Source" setting: the filter of
+  before, character for character. Kill switch BIDHAAN_FIT=0.
+- Proof: test_bot_fit28 17/17, run_suites28.sh 13 suites same on live and patched; THE REAL BOT: the 1920x804
+  CBI 5 clip through "Render now" from John's account -> delivered 1920x1080 (bot chat 63579), file downloaded
+  and measured: picture 1920x804 from y=138 at 10 / 45 / 80 s, looked at next to the source (same proportions,
+  logo on the picture).
+
 ## 2026-10-04 (night) -- bot27 LIVE 23:50: black cinema bars (a wide film in a 16:9 frame)
 
 John (two screenshots: "Pooja Meri Jaan" with black bars vs the bot's CBI 5 without; his 1920x1080 project in

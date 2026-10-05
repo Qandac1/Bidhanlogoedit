@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Logo studio</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #0f1620);
+    --card: var(--tg-theme-secondary-bg-color, #18222f);
+    --fg: var(--tg-theme-text-color, #eef3f8);
+    --muted: var(--tg-theme-hint-color, #8696a8);
+    --accent: var(--tg-theme-button-color, #3d8bfd);
+    --accent-fg: var(--tg-theme-button-text-color, #ffffff);
+    --gold: #ffcc4d;
+    --r: 14px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+         padding: 12px 12px calc(92px + env(safe-area-inset-bottom)); overscroll-behavior: none; }
+  .wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 860px) { .wrap { grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr); align-items: start; }
+                              .left { position: sticky; top: 12px; } }
+  header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px; padding: 2px 2px 0; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+  header span { color: var(--muted); font-size: 13px; }
+  .col { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+  .card { background: var(--card); border-radius: var(--r); padding: 14px; min-width: 0; }
+  .card h2 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+  /* the frame: a 16:9 screen; the picture (stage) sits in it, with black bars on a cinema film */
+  #screen { background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; }
+  #stage { position: relative; width: 100%; aspect-ratio: 16 / 9; touch-action: none; user-select: none; -webkit-user-select: none; cursor: crosshair;
+           background: radial-gradient(120% 140% at 15% 10%, #6b8ea3 0%, #33475b 45%, #1d2733 100%); background-size: 100% 100%; }
+  .guide { position: absolute; background: var(--gold); opacity: 0; transition: opacity .12s; pointer-events: none; }
+  .guide.v { top: 0; bottom: 0; width: 1px; } .guide.h { left: 0; right: 0; height: 1px; } .guide.on { opacity: .9; }
+  .lg { position: absolute; -webkit-user-drag: none; touch-action: none; border-radius: 2px;
+        outline: 1px dashed rgba(255, 255, 255, .45); outline-offset: 2px; cursor: grab; }
+  .lg.sel { outline: 2px solid var(--gold); }
+  .lg.off { display: none; }
+  .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: rgba(128, 150, 175, .14); border-radius: 10px; padding: 3px; margin-top: 10px; }
+  .seg button { background: transparent; color: var(--fg); border: 0; border-radius: 8px; padding: 8px 6px; font-size: 14px; min-height: 36px; cursor: pointer; }
+  .seg button.on { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .chip { font-variant-numeric: tabular-nums; background: rgba(128, 150, 175, .14); border-radius: 999px; padding: 5px 11px; font-size: 13px; color: var(--muted); }
+  .chip b { color: var(--fg); font-weight: 600; }
+  /* logos list */
+  .logo-row { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 11px; border: 1px solid transparent; cursor: pointer; }
+  .logo-row + .logo-row { margin-top: 6px; }
+  .logo-row.sel { border-color: var(--gold); background: rgba(255, 204, 77, .07); }
+  .logo-row .thumb { width: 74px; height: 36px; border-radius: 7px; background: rgba(0, 0, 0, .35); flex: none; object-fit: contain; padding: 4px; }
+  .logo-row .name { flex: 1; font-weight: 600; min-width: 0; }
+  .logo-row .name small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sw { position: relative; width: 50px; height: 30px; flex: none; }
+  .sw input { position: absolute; inset: 0; opacity: 0; margin: 0; width: 100%; height: 100%; cursor: pointer; }
+  .sw i { position: absolute; inset: 0; border-radius: 999px; background: rgba(128, 150, 175, .35); transition: background .15s; pointer-events: none; }
+  .sw i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .sw input:checked + i { background: var(--accent); } .sw input:checked + i::after { transform: translateX(20px); }
+  /* controls */
+  .row { display: flex; align-items: center; gap: 10px; }
+  .btn { border: 0; border-radius: 11px; background: rgba(128, 150, 175, .16); color: var(--fg); font-size: 15px; min-height: 44px; padding: 0 14px; cursor: pointer; }
+  .btn:active { transform: scale(.97); } .btn.sq { width: 44px; padding: 0; font-size: 19px; flex: none; }
+  input[type=range] { flex: 1; min-width: 0; height: 44px; accent-color: var(--accent); }
+  .pad { display: grid; grid-template-columns: repeat(3, 44px); gap: 6px; }
+  .pad .btn { width: 44px; padding: 0; font-size: 16px; }
+  .two { display: flex; justify-content: space-between; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .two .lbl { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  .arrows { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(2, 44px); gap: 6px; }
+  .arrows .btn { width: 44px; padding: 0; } .arrows .up { grid-column: 2; } .arrows .lf { grid-column: 1; grid-row: 2; }
+  .arrows .dn { grid-column: 2; grid-row: 2; } .arrows .rt { grid-column: 3; grid-row: 2; }
+  .time { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .time output { flex: 1; text-align: center; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  /* bottom bar */
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+         background: linear-gradient(to top, var(--bg) 70%, transparent); display: flex; justify-content: center; }
+  .bar .in { width: 100%; max-width: 1040px; display: flex; gap: 10px; }
+  .bar .btn { min-height: 50px; font-size: 16px; }
+  #save { flex: 1; background: var(--accent); color: var(--accent-fg); font-weight: 700; }
+  #save[disabled] { opacity: .5; }
+  #out { display: none; } #cmd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; margin-top: 8px; }
+  #empty { display: none; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Logo studio</h1><span>move it, size it, time it</span></header>
+
+  <div class="col left">
+    <section class="card">
+      <h2>Preview</h2>
+      <div id="screen"><div id="stage">
+        <div class="guide v" id="gv"></div><div class="guide h" id="gh"></div>
+      </div></div>
+      <div class="seg" id="shapes">
+        <button id="s169" class="on" type="button">16:9 film</button>
+        <button id="swide" type="button">Cinema (black bars)</button>
+      </div>
+      <div class="chips">
+        <span class="chip">Left <b id="rx">–</b></span><span class="chip">Top <b id="ry">–</b></span><span class="chip">Size <b id="rw">–</b></span>
+      </div>
+      <p class="hint">Drag anywhere on the picture to move the selected logo. Tap a spot to put it there.</p>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="card">
+      <h2>Logos</h2>
+      <div id="list"></div>
+      <div id="empty">No logo image was found for your account.</div>
+    </section>
+
+    <section class="card">
+      <h2>Size and place</h2>
+      <div class="row">
+        <button class="btn sq" id="minus" type="button" aria-label="smaller">&minus;</button>
+        <input type="range" id="size" min="3" max="70" step="0.5" aria-label="logo size">
+        <button class="btn sq" id="plus" type="button" aria-label="larger">+</button>
+      </div>
+      <div class="two">
+        <div>
+          <div class="lbl">Quick place</div>
+          <div class="pad" id="pad">
+            <button class="btn" data-p="0,0" type="button" aria-label="top left">&#8598;</button><button class="btn" data-p="1,0" type="button" aria-label="top centre">&#8593;</button><button class="btn" data-p="2,0" type="button" aria-label="top right">&#8599;</button>
+            <button class="btn" data-p="0,1" type="button" aria-label="middle left">&#8592;</button><button class="btn" data-p="1,1" type="button" aria-label="centre">&#9678;</button><button class="btn" data-p="2,1" type="button" aria-label="middle right">&#8594;</button>
+            <button class="btn" data-p="0,2" type="button" aria-label="bottom left">&#8601;</button><button class="btn" data-p="1,2" type="button" aria-label="bottom centre">&#8595;</button><button class="btn" data-p="2,2" type="button" aria-label="bottom right">&#8600;</button>
+          </div>
+        </div>
+        <div>
+          <div class="lbl">Fine steps</div>
+          <div class="arrows">
+            <button class="btn up" data-n="0,-1" type="button" aria-label="up">&#9650;</button>
+            <button class="btn lf" data-n="-1,0" type="button" aria-label="left">&#9664;</button>
+            <button class="btn dn" data-n="0,1" type="button" aria-label="down">&#9660;</button>
+            <button class="btn rt" data-n="1,0" type="button" aria-label="right">&#9654;</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>When the logo appears</h2>
+      <div class="seg" id="tchips" style="margin-top:0">
+        <button data-t="0" type="button">Start</button><button data-t="20" type="button">20 s</button><button data-t="45" type="button">45 s</button>
+        <button data-t="60" type="button">1 min</button><button data-t="120" type="button">2 min</button>
+      </div>
+      <div class="time">
+        <button class="btn sq" id="tminus" type="button" aria-label="5 seconds earlier">&minus;</button>
+        <output id="tval">0:00</output>
+        <button class="btn sq" id="tplus" type="button" aria-label="5 seconds later">+</button>
+      </div>
+      <p class="hint">Counted from the first second of the film. Use it to keep the logo off the studio's opening cards.</p>
+    </section>
+
+    <section class="card" id="out">
+      <h2>Opened outside Telegram</h2>
+      Send these lines to the bot instead:
+      <div id="cmd"></div>
+    </section>
+  </div>
+</div>
+
+<div class="bar"><div class="in">
+  <button class="btn" id="reset" type="button">Reset</button>
+  <button class="btn" id="save" type="button">Save</button>
+</div></div>
+
+<script>
+(function () {
+  "use strict";
+  var tg = (window.Telegram && Telegram.WebApp && Telegram.WebApp.platform && Telegram.WebApp.platform !== "unknown") ? Telegram.WebApp : null;
+  if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {} }
+  function $(id) { return document.getElementById(id); }
+  function b64(s) { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return decodeURIComponent(escape(atob(s))); }
+  var P = { logos: [], bg: "", ar: 16 / 9, start: 0 };
+  try { var q = JSON.parse(b64(new URLSearchParams(location.search).get("d") || "")); for (var k in q) P[k] = q[k]; } catch (e) {}
+
+  var stage = $("stage"), items = [], sel = -1, AR = P.ar || 16 / 9;
+  var MINW = 0.03, MAXW = 0.70, SNAP = 0.012, MARGIN_X = 0.03, T_MAX = 3 * 3600;
+  var start0 = Math.max(0, Math.min(T_MAX, Math.round(+P.start || 0))), startT = start0;
+
+  // ---- shape of the picture: a 16:9 screen, the picture inside it (bars on a cinema film) ----
+  function setShape(ar) {
+    AR = ar;
+    stage.style.aspectRatio = String(ar);
+    if (ar >= 16 / 9) { stage.style.width = "100%"; stage.style.height = "auto"; }
+    else { stage.style.height = "100%"; stage.style.width = "auto"; }
+    layout();
+  }
+  if (P.bg) {
+    var bg = new Image();
+    bg.onload = function () { stage.style.backgroundImage = "url('" + P.bg + "')"; $("shapes").style.display = "none"; setShape(bg.naturalWidth / bg.naturalHeight); };
+    bg.src = P.bg;
+  }
+  function pickShape(wide) { $("swide").className = wide ? "on" : ""; $("s169").className = wide ? "" : "on"; setShape(wide ? 2.39 : 16 / 9); }
+  $("s169").onclick = function () { pickShape(false); };
+  $("swide").onclick = function () { pickShape(true); };
+
+  // ---- geometry ----
+  function hOf(it) { return it.w * AR * it.ratio; }                 // logo height as a share of the picture's height
+  function clamp(it) {
+    it.w = Math.min(MAXW, Math.max(MINW, it.w));
+    if (hOf(it) > 1) it.w = 1 / (AR * it.ratio);
+    it.x = Math.min(1 - it.w, Math.max(0, it.x));
+    it.y = Math.min(1 - hOf(it), Math.max(0, it.y));
+  }
+  function fromCorner(it, L) {                                       // the bot's corner + margins -> left / top
+    var c = L.c || "TL";
+    it.x = (c === "TR" || c === "BR") ? 1 - it.w - L.mx : L.mx;
+    it.y = (c === "BL" || c === "BR") ? 1 - hOf(it) - L.my : L.my;
+  }
+  function pct(v) { return (v * 100).toFixed(1) + " %"; }
+  function mmss(t) { return Math.floor(t / 60) + ":" + ("0" + (t % 60)).slice(-2); }
+
+  function layout() {
+    items.forEach(function (it, i) {
+      if (!it.ready) return;
+      clamp(it);
+      it.el.style.left = (it.x * 100) + "%"; it.el.style.top = (it.y * 100) + "%"; it.el.style.width = (it.w * 100) + "%";
+      it.el.className = "lg" + (i === sel ? " sel" : "") + (it.on ? "" : " off");
+      it.row.className = "logo-row" + (i === sel ? " sel" : "");
+      it.sub.textContent = it.on ? "left " + pct(it.x) + " · top " + pct(it.y) + " · size " + pct(it.w) : "switched off";
+    });
+    var it = items[sel], live = it && it.ready && it.on;
+    $("rx").textContent = live ? pct(it.x) : "–"; $("ry").textContent = live ? pct(it.y) : "–"; $("rw").textContent = live ? pct(it.w) : "–";
+    if (live) $("size").value = (it.w * 100).toFixed(1);
+    $("tval").textContent = mmss(startT);
+    var tb = $("tchips").children;
+    for (var k = 0; k < tb.length; k++) tb[k].className = (+tb[k].getAttribute("data-t") === startT) ? "on" : "";
+  }
+  function cur() { var it = items[sel]; return (it && it.ready && it.on) ? it : null; }
+  function pickOn() {                                                // keep the selection on a logo that is switched on
+    if (cur()) return;
+    for (var i = 0; i < items.length; i++) if (items[i].ready && items[i].on) { sel = i; return; }
+  }
+  function select(i) { sel = i; layout(); }
+
+  // ---- the logos ----
+  (P.logos || []).forEach(function (L, i) {
+    var it = { n: L.n, label: L.label || L.n, w: +L.w || 0.13, x: 0, y: 0, ratio: 0.3, ready: false, on: L.on !== false, el: new Image() };
+    it.el.className = "lg"; it.el.draggable = false; it.el.alt = it.label;
+    var row = document.createElement("div"); row.className = "logo-row";
+    row.innerHTML = '<img class="thumb" alt=""><div class="name"></div><label class="sw"><input type="checkbox"><i></i></label>';
+    row.querySelector(".thumb").src = L.img;
+    var name = row.querySelector(".name"); name.textContent = it.label;
+    it.sub = document.createElement("small"); name.appendChild(it.sub);
+    var box = row.querySelector("input"); box.checked = it.on; box.setAttribute("aria-label", it.label + " on or off");
+    box.onchange = function () { it.on = box.checked; if (it.on) sel = i; else pickOn(); layout(); };
+    row.onclick = function (e) { if (e.target === box) return; select(i); };
+    it.row = row; it.box = box; $("list").appendChild(row);
+    it.el.onload = function () {
+      it.ratio = it.el.naturalHeight / it.el.naturalWidth; fromCorner(it, L); clamp(it);
+      it.start = { x: it.x, y: it.y, w: it.w, on: it.on }; it.ready = true; stage.appendChild(it.el);
+      if (sel < 0 || (!items[sel].on && it.on)) sel = i;
+      layout();
+    };
+    it.el.src = L.img;
+    items.push(it);
+  });
+  if (!(P.logos || []).length) { $("empty").style.display = "block"; $("save").disabled = true; }
+
+  // ---- dragging: anywhere on the picture moves the selected logo; a logo under the finger is selected first;
+  //      a tap on the picture puts the selected logo's middle there; the middle lines are magnetic ----
+  var drag = null;
+  function snap(it) {
+    var gx = null, gy = null, cx = it.x + it.w / 2, cy = it.y + hOf(it) / 2;
+    if (Math.abs(cx - 0.5) < SNAP) { it.x = 0.5 - it.w / 2; gx = 0.5; }
+    if (Math.abs(cy - 0.5) < SNAP * AR) { it.y = 0.5 - hOf(it) / 2; gy = 0.5; }
+    $("gv").style.left = (gx === null ? 0 : gx * 100) + "%"; $("gv").className = "guide v" + (gx === null ? "" : " on");
+    $("gh").style.top = (gy === null ? 0 : gy * 100) + "%"; $("gh").className = "guide h" + (gy === null ? "" : " on");
+  }
+  function guidesOff() { $("gv").className = "guide v"; $("gh").className = "guide h"; }
+  stage.addEventListener("pointerdown", function (e) {
+    var onLogo = false;
+    items.forEach(function (it, i) { if (e.target === it.el) { sel = i; onLogo = true; } });
+    var it = cur();
+    layout();
+    if (!it) return;
+    drag = { px: e.clientX, py: e.clientY, x: it.x, y: it.y, moved: false, onLogo: onLogo };
+    try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault();
+  });
+  stage.addEventListener("pointermove", function (e) {
+    var it = cur();
+    if (!drag || !it) return;
+    if (Math.abs(e.clientX - drag.px) + Math.abs(e.clientY - drag.py) > 6) drag.moved = true;
+    if (!drag.moved) return;
+    var r = stage.getBoundingClientRect();
+    it.x = drag.x + (e.clientX - drag.px) / r.width; it.y = drag.y + (e.clientY - drag.py) / r.height;
+    clamp(it); snap(it); layout();
+  });
+  stage.addEventListener("pointerup", function (e) {
+    var it = cur();
+    if (drag && it && !drag.moved && !drag.onLogo) {
+      var r = stage.getBoundingClientRect();
+      it.x = (e.clientX - r.left) / r.width - it.w / 2; it.y = (e.clientY - r.top) / r.height - hOf(it) / 2; layout();
+    }
+    drag = null; guidesOff();
+  });
+  stage.addEventListener("pointercancel", function () { drag = null; guidesOff(); });
+
+  // ---- size, quick places, fine steps ----
+  function resize(w) { var it = cur(); if (!it) return; var cx = it.x + it.w / 2, cy = it.y + hOf(it) / 2;
+                       it.w = w; clamp(it); it.x = cx - it.w / 2; it.y = cy - hOf(it) / 2; layout(); }
+  $("size").oninput = function () { resize(parseFloat(this.value) / 100); };
+  $("minus").onclick = function () { var it = cur(); if (it) resize(it.w - 0.005); };
+  $("plus").onclick = function () { var it = cur(); if (it) resize(it.w + 0.005); };
+  document.querySelectorAll("#pad button").forEach(function (b) {
+    b.onclick = function () {
+      var it = cur(); if (!it) return;
+      var p = b.getAttribute("data-p").split(","), mx = MARGIN_X, my = MARGIN_X * AR, h = hOf(it);
+      it.x = [mx, (1 - it.w) / 2, 1 - it.w - mx][+p[0]]; it.y = [my, (1 - h) / 2, 1 - h - my][+p[1]]; layout();
+    };
+  });
+  document.querySelectorAll("button[data-n]").forEach(function (b) {
+    b.onclick = function () { var it = cur(); if (!it) return; var d = b.getAttribute("data-n").split(",");
+                              it.x += (+d[0]) * 0.0025; it.y += (+d[1]) * 0.0025 * AR; layout(); };
+  });
+
+  // ---- the time the logo appears ----
+  function setT(t) { startT = Math.max(0, Math.min(T_MAX, Math.round(t))); layout(); }
+  document.querySelectorAll("#tchips button").forEach(function (b) { b.onclick = function () { setT(+b.getAttribute("data-t")); }; });
+  $("tminus").onclick = function () { setT(startT - 5); };
+  $("tplus").onclick = function () { setT(startT + 5); };
+
+  // ---- reset / save ----
+  $("reset").onclick = function () {
+    items.forEach(function (it) { if (!it.start) return; it.x = it.start.x; it.y = it.start.y; it.w = it.start.w; it.on = it.start.on; it.box.checked = it.on; });
+    startT = start0; pickOn(); layout();
+  };
+  function result() {
+    return { k: "logo_place", v: 2, start: startT, logos: items.filter(function (it) { return it.ready; }).map(function (it) {
+      return { n: it.n, on: !!it.on, x: +it.x.toFixed(4), y: +it.y.toFixed(4), w: +it.w.toFixed(4) }; }) };
+  }
+  window.__result = result;                                           // read by the tests
+  $("save").onclick = function () {
+    var r = result();
+    if (tg && tg.sendData) { try { if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success"); } catch (e) {} tg.sendData(JSON.stringify(r)); return; }
+    $("out").style.display = "block";
+    $("cmd").textContent = r.logos.filter(function (l) { return l.on; }).map(function (l) {
+      return "/logoset " + l.n + " " + (l.x * 100).toFixed(1) + " " + (l.y * 100).toFixed(1) + " " + (l.w * 100).toFixed(1); }).concat(["/logoat " + r.start + "s"]).join("\n");
+    $("out").scrollIntoView({ block: "center" });
+  };
+  window.addEventListener("resize", layout);
+  layout();
+})();
+</script>
+</body>
+</html>
