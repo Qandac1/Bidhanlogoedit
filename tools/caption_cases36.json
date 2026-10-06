@@ -1,0 +1,82 @@
+[
+[
+"UGAAR AH BIDHAAN TV 0619624090",
+"UGAAR AH BIDHAAN TV 0619624090"
+],
+[
+"     U GAAR AH\nRASHKA BOY MUSALSAL TV",
+"     U GAAR AH\nRASHKA BOY MUSALSAL TV"
+],
+[
+"  Bidhaan   TV \n 0619  ",
+" Bidhaan   TV\n0619"
+],
+[
+"\n\n  A\n\n  B  \n\n",
+"A\n\nB"
+],
+[
+"A\r\nB\rC",
+"A\nB\nC"
+],
+[
+"\tTAB",
+"TAB"
+],
+[
+"A\n\tB",
+"A\n    B"
+],
+[
+"   ONE LINE   ",
+"ONE LINE"
+],
+[
+"A  B",
+"A  B"
+],
+[
+"1\n2\n3\n4\n5\n6\n7\n8",
+"1\n2\n3\n4\n5\n6"
+],
+[
+"LINE\n\n\n\n\n\nLATE",
+"LINE"
+],
+[
+"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+],
+[
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b",
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+],
+[
+"",
+""
+],
+[
+"   \n  \n",
+""
+],
+[
+null,
+""
+],
+[
+"A\u0007B\u0000C",
+"ABC"
+],
+[
+"CAASHAQ \u2764\n  SOMALI",
+"CAASHAQ \u2764\n  SOMALI"
+],
+[
+"   A\n     B\n C",
+"  A\n    B\nC"
+],
+[
+"TOP\n      \nBOTTOM",
+"TOP\n\nBOTTOM"
+]
+]

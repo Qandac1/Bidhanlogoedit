@@ -51,10 +51,23 @@
   .guide.v { top: 0; bottom: 0; width: 1px; } .guide.h { left: 0; right: 0; height: 1px; } .guide.on { opacity: .9; }
   .lg { position: absolute; -webkit-user-drag: none; touch-action: none; border-radius: 2px; outline: 1px dashed rgba(255, 255, 255, .45); outline-offset: 2px; cursor: grab; }
   .lg.sel { outline: 2px solid var(--gold); } .lg.off { display: none; }
-  #cap { position: absolute; left: 0; right: 0; text-align: center; white-space: nowrap; pointer-events: none; font-weight: 700; line-height: 1;
-         text-shadow: 0 0 2px #000, 0 0 2px #000, 0 1px 2px #000; bottom: 9%; }
+  /* the caption AS TYPED: its lines stand left-aligned in a block (line breaks and spaces kept), the block is centred --
+     the way the render draws it (one drawtext, x=(w-text_w)/2). The font files are bold already: no extra bold. */
+  #cap { position: absolute; left: 0; right: 0; text-align: center; pointer-events: none; line-height: 0; bottom: 9%; }
+  #capin { display: inline-block; text-align: left; white-space: pre; font-weight: 400; font-synthesis: none; line-height: 1.17;
+           text-shadow: 0 0 2px #000, 0 0 2px #000, 0 1px 2px #000; }
   #cap.play { animation: crawl var(--crawl, 5s) linear 1; }
-  @keyframes crawl { from { bottom: -12%; } to { bottom: 108%; } }
+  @keyframes crawl { from { bottom: calc(-1 * var(--caph, 12%)); } to { bottom: 100%; } }
+  /* the film strip: the waiting video's own pictures */
+  #film { position: relative; height: 46px; margin-top: 8px; border-radius: 9px; overflow: hidden; background: rgba(0, 0, 0, .32); display: none;
+          touch-action: none; user-select: none; -webkit-user-select: none; cursor: ew-resize; }
+  #film.on { display: flex; }
+  #film .tile, .tfilm .tile { flex: 1 1 0; min-width: 0; background-size: cover; background-position: center; opacity: 0; transition: opacity .3s; }
+  #film .tile.ok, .tfilm .tile.ok { opacity: 1; }
+  #fhead { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; background: var(--gold); box-shadow: 0 0 0 1px rgba(0, 0, 0, .65); pointer-events: none; }
+  #ftime { position: absolute; right: 6px; top: 5px; font-size: 11px; font-variant-numeric: tabular-nums; background: rgba(0, 0, 0, .66); color: #fff; padding: 2px 7px; border-radius: 999px; pointer-events: none; }
+  #nofilm { display: none; }
+  .tfilm { position: absolute; inset: 0; display: flex; opacity: .38; pointer-events: none; }
   .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   .chip { font-variant-numeric: tabular-nums; background: var(--soft); border-radius: 999px; padding: 5px 11px; font-size: 13px; color: var(--muted); }
   .chip b { color: var(--fg); font-weight: 600; }
@@ -86,12 +99,17 @@
   .arrows .btn { width: 44px; padding: 0; } .arrows .up { grid-column: 2; } .arrows .lf { grid-column: 1; grid-row: 2; }
   .arrows .dn { grid-column: 2; grid-row: 2; } .arrows .rt { grid-column: 3; grid-row: 2; }
   /* caption */
-  textarea { width: 100%; min-height: 64px; resize: vertical; border: 1px solid var(--soft); border-radius: 11px; background: rgba(0, 0, 0, .18); padding: 10px 12px; font-size: 16px; }
+  /* typed as it will stand: no automatic wrapping (a line ends where Enter was pressed), in the caption's own font */
+  textarea { width: 100%; min-height: 92px; resize: vertical; border: 1px solid var(--soft); border-radius: 11px; background: rgba(0, 0, 0, .18); padding: 10px 12px; font-size: 16px;
+             white-space: pre; overflow-x: auto; overflow-wrap: normal; font-synthesis: none; }
   textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
   .fonts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  @media (min-width: 520px) { .fonts { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-  .font { border: 1px solid transparent; border-radius: 11px; background: var(--soft); padding: 10px 8px 8px; text-align: center; cursor: pointer; min-width: 0; }
-  .font b { display: block; font-size: 20px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (min-width: 350px) { .fonts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (min-width: 560px) { .fonts { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (min-width: 880px) { .fonts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (min-width: 1040px) { .fonts { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .font { border: 1px solid transparent; border-radius: 11px; background: var(--soft); padding: 10px 6px 8px; text-align: center; cursor: pointer; min-width: 0; }
+  .font b { display: block; font-size: 19px; font-weight: 400; font-synthesis: none; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .font small { color: var(--muted); font-size: 11px; }
   .font.on { border-color: var(--gold); background: rgba(255, 204, 77, .09); }
   .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -140,8 +158,10 @@
       <h2>Preview</h2>
       <div id="screen"><div id="stage">
         <div class="guide v" id="gv"></div><div class="guide h" id="gh"></div>
-        <div id="cap"></div>
+        <div id="cap"><span id="capin"></span></div>
       </div></div>
+      <div id="film" aria-label="the video: slide to see any moment"><div id="fhead"></div><span id="ftime"></span></div>
+      <p class="hint" id="nofilm">To see your own video here: send the video to the bot first, then open the Studio.</p>
       <div class="row" style="margin-top:10px">
         <div class="seg" id="shapes" style="flex:1">
           <button id="s169" class="on" type="button">16:9 film</button>
@@ -201,7 +221,8 @@
     <div class="pane" id="p-caption">
       <section class="card">
         <h2>Caption</h2>
-        <textarea id="ctext" maxlength="200" rows="2" placeholder="Leave empty for no caption" aria-label="caption text"></textarea>
+        <textarea id="ctext" maxlength="300" rows="3" wrap="off" spellcheck="false" placeholder="Leave empty for no caption" aria-label="caption text"></textarea>
+        <p class="hint" style="margin-top:6px">It appears exactly as you type it: press Enter for a new line, add spaces to move a line to the right.</p>
         <div class="lbl">Font</div>
         <div class="fonts" id="fonts"></div>
         <div class="lbl">Colour</div>
@@ -311,11 +332,31 @@
 
   var stage = $("stage"), AR = 16 / 9, C = null, S = {}, cur = "banner", sel = -1, selT = -1, LEN = 7200;
   var MINW = 0.03, MAXW = 0.70, SNAP = 0.012, MARGIN_X = 0.03, T_MAX = 6 * 3600, MAX_TIMES = 40;
-  var FONTS = [{ id: "", label: "Classic", css: "sans-serif" }], COLORS = [{ id: "white", css: "#ffffff" }];
+  var FONTS = [{ id: "", label: "Classic", css: "sans-serif", lh: 1.17 }], COLORS = [{ id: "white", css: "#ffffff" }];
   var LENS = [1800, 3600, 5400, 7200, 9000, 10800];
+  var CAP_MAX = 300, CAP_LINES = 6;                                  // the bot's own limits (branding.caption_lines)
+  var FR = null, curT = 0;                                           // the waiting video's pictures, the moment shown
 
   // ---------------------------------------------------------------- data
-  function capOut(c) { return { text: c.text.replace(/\s+/g, " ").trim(), font: c.font, color: c.color, size: r4(c.size), seconds: c.seconds, count: c.count, times: c.times.slice() }; }
+  // The caption AS TYPED -- the same cleaning the bot does (branding.caption_lines): line breaks and spaces are kept;
+  // only what cannot be seen goes: spaces at the end of a line, empty lines at the start and the end, and the
+  // indent ALL lines share (in a centred block only the difference between the lines can be seen).
+  function capNorm(s) {
+    var ls = String(s || "").replace(/\r\n?/g, "\n").replace(/\t/g, "    ").replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, "").split("\n")
+               .map(function (l) { return l.replace(/\s+$/, ""); });
+    while (ls.length && !ls[0]) ls.shift();
+    while (ls.length && !ls[ls.length - 1]) ls.pop();
+    ls = ls.slice(0, CAP_LINES);
+    while (ls.length && !ls[ls.length - 1]) ls.pop();
+    var ind = -1;
+    ls.forEach(function (l) { if (!l) return; var k = l.length - l.replace(/^ +/, "").length; if (ind < 0 || k < ind) ind = k; });
+    if (ind > 0) ls = ls.map(function (l) { return l ? l.slice(ind) : ""; });
+    var out = ls.join("\n");
+    if (out.length > CAP_MAX) out = out.slice(0, CAP_MAX).replace(/\s+$/, "");
+    return out;
+  }
+  window.__capNorm = capNorm;                                        // read by the tests
+  function capOut(c) { return { text: capNorm(c.text), font: c.font, color: c.color, size: r4(c.size), seconds: c.seconds, count: c.count, times: c.times.slice() }; }
   function trimOut(t) { return { mode: t.mode, a: Math.round(t.a), b: Math.round(t.b) }; }
   function norm(set) {                                               // one set of settings, as the page works with it
     var c = set.cap || {}, t = set.trim || {};
@@ -467,8 +508,55 @@
     else { if (!c.times.length) c.times = [300, 900, 1800].filter(function (t) { return t < LEN; }); tab("time"); } }; });
   $("nminus").onclick = function () { st().cap.count = clampN((st().cap.count || 8) - 1, 1, 40); render(); };
   $("nplus").onclick = function () { st().cap.count = clampN((st().cap.count || 8) + 1, 1, 40); render(); };
-  $("play").onclick = function () { var c = $("cap"); c.className = ""; void c.offsetWidth; c.style.setProperty("--crawl", Math.min(8, st().cap.seconds) + "s"); c.className = "play"; };
+  $("play").onclick = function () { var c = $("cap"); c.className = ""; void c.offsetWidth; c.style.setProperty("--crawl", Math.min(8, st().cap.seconds) + "s");
+    c.style.setProperty("--caph", Math.max(1, $("capin").offsetHeight) + "px"); c.className = "play"; };
   $("cap").addEventListener("animationend", function () { this.className = ""; });
+
+  // ---------------------------------------------------------------- the waiting video's own pictures (film strip)
+  // The bot cuts one picture from the middle of each of N equal parts of the video and lists them in frames.json as
+  // they come. The strip under the preview shows them side by side; sliding along it puts that moment's picture
+  // behind the logo and the caption. With a video the timeline is exactly as long as the video.
+  function frameAt(t) { var best = null; if (!FR) return null;
+    FR.list.forEach(function (f) { if (f.ok && (best === null || Math.abs(f.t - t) < Math.abs(best.t - t))) best = f; }); return best; }
+  function showT(t) {
+    if (!FR) return;
+    curT = clampN(t, 0, FR.dur);
+    var f = frameAt(curT);
+    if (f && stage.getAttribute("data-f") !== f.img) { stage.style.backgroundImage = "url('" + f.img + "')"; stage.setAttribute("data-f", f.img); }
+    $("fhead").style.left = (curT / FR.dur * 100) + "%"; $("ftime").textContent = hms(curT) + " / " + hms(FR.dur);
+  }
+  window.__showT = showT;
+  function buildFilm() {
+    each("#film .tile", function (e) { e.parentNode.removeChild(e); });
+    for (var i = 0; i < FR.n; i++) { var d = document.createElement("div"); d.className = "tile"; d.setAttribute("data-i", i); $("film").insertBefore(d, $("fhead")); }
+    $("film").className = "on"; $("lens").style.display = "none"; $("nofilm").style.display = "none";
+  }
+  function addFrames(d) {
+    if (!d || !(d.dur > 0) || !d.frames) return;
+    if (!FR) { FR = { dur: +d.dur, n: Math.max(1, +d.n || d.frames.length), list: [], done: false }; LEN = FR.dur; curT = FR.dur / 8; buildFilm(); render(true); }
+    d.frames.forEach(function (x) {
+      if (FR.list.some(function (f) { return f.i === x.i; })) return;
+      var f = { i: +x.i, t: +x.t, img: String(x.img), ok: false }; FR.list.push(f);
+      var im = new Image();
+      im.onload = function () { f.ok = true;
+        each('.tile[data-i="' + f.i + '"]', function (e) { e.style.backgroundImage = "url('" + f.img + "')"; e.className = "tile ok"; });
+        showT(curT); };
+      im.src = f.img;
+    });
+    FR.done = !!d.done;
+  }
+  function loadFrames(url, tries) {
+    fetch(url, { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (d) { addFrames(d); if (!(FR && FR.done) && tries < 80) setTimeout(function () { loadFrames(url, tries + 1); }, 1200); })
+      .catch(function () { if (tries < 80) setTimeout(function () { loadFrames(url, tries + 1); }, 2500); });
+  }
+  window.__frames = function () { return FR; };
+  var fdrag = false;
+  function filmAt(e) { var r = $("film").getBoundingClientRect(); showT(clampN((e.clientX - r.left) / r.width, 0, 1) * FR.dur); }
+  $("film").addEventListener("pointerdown", function (e) { if (!FR) return; fdrag = true; try { $("film").setPointerCapture(e.pointerId); } catch (err) {} filmAt(e); e.preventDefault(); });
+  $("film").addEventListener("pointermove", function (e) { if (fdrag && FR) filmAt(e); });
+  $("film").addEventListener("pointerup", function () { fdrag = false; });
+  $("film").addEventListener("pointercancel", function () { fdrag = false; });
 
   // ---------------------------------------------------------------- timeline
   function buildLens() {
@@ -482,6 +570,13 @@
   var tdrag = null;
   function drawTrack() {
     var tr = $("track"), s_ = st(); tr.innerHTML = "";
+    if (FR) {                                                        // the video's own pictures behind the marks
+      var tf = document.createElement("div"); tf.className = "tfilm";
+      for (var q = 0; q < FR.n; q++) { var td = document.createElement("div"), fq = null; td.setAttribute("data-i", q);
+        FR.list.forEach(function (f) { if (f.i === q && f.ok) fq = f; });
+        td.className = fq ? "tile ok" : "tile"; if (fq) td.style.backgroundImage = "url('" + fq.img + "')"; tf.appendChild(td); }
+      tr.appendChild(tf);
+    }
     var stepT = LEN <= 1800 ? 300 : LEN <= 5400 ? 900 : 1800;
     for (var t = 0; t < LEN; t += stepT) { var d = document.createElement("div"); d.className = "tick"; d.style.left = xOf(t) + "%"; d.innerHTML = "<span></span>"; d.firstChild.textContent = hms(t).replace(/:00$/, ""); tr.appendChild(d); }
     var z = document.createElement("div"); z.className = "zone"; z.style.left = xOf(s_.start) + "%"; z.style.right = "0"; tr.appendChild(z);
@@ -501,9 +596,11 @@
            if (c.times.indexOf(t) < 0) { c.times.push(t); c.times.sort(function (a, b) { return a - b; }); } selT = c.times.indexOf(t); tdrag = { kind: "cap", v: t }; }
     try { $("track").setPointerCapture(e.pointerId); } catch (err) {}
     e.preventDefault(); render();
+    if (FR) showT(tdrag.kind === "logo" ? st().start : tdrag.v);     // the preview shows that moment of the video
   });
   $("track").addEventListener("pointermove", function (e) {
     if (!tdrag) return; var t = roundT(tAt(e.clientX));
+    if (FR) showT(t);
     if (tdrag.kind === "logo") st().start = clampN(t, 0, T_MAX);
     else { var c = st().cap, i = c.times.indexOf(tdrag.v); if (i < 0) return; if (c.times.indexOf(t) >= 0 && t !== tdrag.v) return;
            c.times[i] = t; tdrag.v = t; c.times.sort(function (a, b) { return a - b; }); selT = c.times.indexOf(t); }
@@ -512,8 +609,8 @@
   function tend() { tdrag = null; render(); }
   $("track").addEventListener("pointerup", tend); $("track").addEventListener("pointercancel", tend);
   function addTime(t) { var c = st().cap; if (c.times.length >= MAX_TIMES) { toast(MAX_TIMES + " caption times is the most"); return; }
-    t = clampN(Math.round(t), 0, T_MAX); if (c.times.indexOf(t) < 0) { c.times.push(t); c.times.sort(function (a, b) { return a - b; }); } selT = c.times.indexOf(t);
-    if (t > LEN) LEN = LENS.filter(function (L) { return L >= t; })[0] || LENS[LENS.length - 1]; render(); }
+    t = clampN(Math.round(t), 0, FR ? Math.floor(FR.dur) : T_MAX); if (c.times.indexOf(t) < 0) { c.times.push(t); c.times.sort(function (a, b) { return a - b; }); } selT = c.times.indexOf(t);
+    if (t > LEN && !FR) LEN = LENS.filter(function (L) { return L >= t; })[0] || LENS[LENS.length - 1]; render(); if (FR) showT(t); }
   window.__addTime = addTime;
   $("tadd").onclick = function () { var v = prompt("Caption time: minutes (12), or m:ss (12:30), or h:mm:ss", "10"); if (v === null) return; var t = parseT(v);
     if (t === null) { toast("Could not read that time"); return; } if (v.indexOf(":") < 0) t *= 60; addTime(t); };
@@ -553,9 +650,10 @@
     $("rx").textContent = L ? pct(L.x) : "–"; $("ry").textContent = L ? pct(L.y) : "–"; $("rw").textContent = L ? pct(L.w) : "–";
     if (L) $("size").value = (L.w * 100).toFixed(1);
     // caption
-    var c = s_.cap, cap = $("cap"), sh = stage.getBoundingClientRect().height;
-    cap.textContent = c.text.replace(/\s+/g, " ").trim(); cap.style.fontFamily = fontOf(c.font).css; cap.style.color = colorOf(c.color).css;
-    cap.style.fontSize = Math.max(5, sh * c.size) + "px";
+    var c = s_.cap, cap = $("capin"), sh = stage.getBoundingClientRect().height, fo = fontOf(c.font);
+    cap.textContent = capNorm(c.text); cap.style.fontFamily = fo.css; cap.style.color = colorOf(c.color).css;
+    cap.style.fontSize = Math.max(5, sh * c.size) + "px"; cap.style.lineHeight = String(fo.lh || 1.17);
+    $("ctext").style.fontFamily = fo.css;                            // typed in the caption's own font: a space is as wide as it will be
     if (!keepText) $("ctext").value = c.text;
     each("#fonts .font", function (d) { d.className = "font" + (d.getAttribute("data-f") === fontOf(c.font).id ? " on" : ""); });
     each("#colors .swatch", function (d) { d.className = "swatch" + (d.getAttribute("data-c") === colorOf(c.color).id ? " on" : ""); });
@@ -607,7 +705,8 @@
   function boot(cfg) {
     C = cfg;
     if (cfg.fonts && cfg.fonts.length) {
-      FONTS = cfg.fonts.map(function (f) { return { id: f.id, label: f.label, css: f.file ? "'cap-" + (f.id || "classic") + "', sans-serif" : "sans-serif", file: f.file }; });
+      FONTS = cfg.fonts.map(function (f) { return { id: f.id, label: f.label, css: f.file ? "'cap-" + (f.id || "classic") + "', sans-serif" : "sans-serif", file: f.file,
+                                                    lh: (f.lh > 0.5 && f.lh < 2.5) ? +f.lh : 1.17 }; });
       FONTS.forEach(function (f) { if (!f.file || !window.FontFace) return;
         try { var ff = new FontFace("cap-" + (f.id || "classic"), "url(" + f.file + ")"); ff.load().then(function (x) { document.fonts.add(x); render(true); }, function () {}); } catch (e) {} });
     }
@@ -615,8 +714,10 @@
     ["banner", "dub"].forEach(function (n) { if (cfg.sets && cfg.sets[n]) S[n] = norm(cfg.sets[n]); });
     cur = (cfg.active === "dub" && S.dub) ? "dub" : (S.banner ? "banner" : "dub");
     if (cfg.dur > 0) LEN = LENS.filter(function (L) { return L >= cfg.dur; })[0] || LENS[LENS.length - 1];
-    if (cfg.bg) { var bg = new Image(); bg.onload = function () { stage.style.backgroundImage = "url('" + cfg.bg + "')"; $("shapes").style.display = "none"; setShape(bg.naturalWidth / bg.naturalHeight); }; bg.src = cfg.bg; }
+    if (cfg.bg) { var bg = new Image(); bg.onload = function () { if (!stage.style.backgroundImage) stage.style.backgroundImage = "url('" + cfg.bg + "')"; $("shapes").style.display = "none"; setShape(bg.naturalWidth / bg.naturalHeight); }; bg.src = cfg.bg; }
+    else $("nofilm").style.display = "block";
     buildCaptionUI(); buildLens(); buildLogos(); render();
+    if (cfg.frames) loadFrames(cfg.frames, 0);
     if (!tg) $("out").style.display = "block";
   }
   window.addEventListener("resize", function () { render(true); });

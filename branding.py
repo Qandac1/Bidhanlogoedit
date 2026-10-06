@@ -38,6 +38,19 @@ CAPTION_FONTS = {
     "lato": ("Lato", "Lato-Black.ttf"),
     "bebas": ("Bebas", "BebasNeue-Bold.otf"),
     "serif": ("Serif", "DejaVuSerif-Bold.ttf"),
+    # bot36 (John 2026-10-06: "so good fonts, attractive, modern"): again Debian's own font packages, unchanged
+    "spartan": ("Spartan", "LeagueSpartan-Bold.otf"),
+    "sora": ("Sora", "Sora-ExtraBold.otf"),
+    "manrope": ("Manrope", "Manrope-ExtraBold.ttf"),
+    "inter": ("Inter", "InterDisplay-Black.otf"),
+    "black": ("Montserrat Black", "Montserrat-Black.otf"),
+    "cabin": ("Cabin", "Cabin-Bold.otf"),
+    "kaffeesatz": ("Kaffeesatz", "YanoneKaffeesatz-Bold.otf"),
+    "slab": ("Slab", "RobotoSlab-Bold.otf"),
+    "quicksand": ("Quicksand", "Quicksand-Bold.ttf"),
+    "comfortaa": ("Comfortaa", "Comfortaa-Bold.ttf"),
+    "lobster": ("Lobster", "lobster.otf"),
+    "dancing": ("Dancing", "DancingScript-Bold.otf"),
 }
 CAPTION_COLORS = {"white": "white", "yellow": "0xFFD60A", "gold": "0xFFC107", "cyan": "0x4DD0E1",
                   "green": "0x69F0AE", "pink": "0xFF4F9A", "red": "0xFF5252", "orange": "0xFF9F0A"}
@@ -65,14 +78,78 @@ def caption_color(v) -> str:
         return "white"
 
 
+# bot36 (John 2026-10-06: "the way I type, the way I give space, my art"): a caption keeps its line breaks and its
+# spaces. drawtext draws them as they are -- the lines left-aligned in a block, the block centred by
+# x=(w-text_w)/2, the next line one font line height lower (measured on all 20 fonts in the bot's ffmpeg).
+CAPTION_MAX_LEN, CAPTION_MAX_LINES = 300, 6
+
+
+def caption_lines(text) -> str:
+    """A caption AS TYPED. Kept: every line break, every space inside a line and before it. Changed only what
+    cannot be seen or drawn: Windows line ends, a tab (4 spaces), control characters, spaces at the END of a line
+    (they would push the block off centre), empty lines at the start and the end, the indent ALL lines share (in
+    a centred block only the difference between the lines shows); cut to CAPTION_MAX_LINES lines and
+    CAPTION_MAX_LEN characters. A text on one line with single spaces comes back as it is. Never raises."""
+    try:
+        t = str(text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+        t = "".join(ch for ch in t if ch == "\n" or (ord(ch) >= 32 and ord(ch) != 127))
+        ls = [ln.rstrip() for ln in t.split("\n")]
+        while ls and not ls[0]:
+            ls.pop(0)
+        while ls and not ls[-1]:
+            ls.pop()
+        ls = ls[:CAPTION_MAX_LINES]
+        while ls and not ls[-1]:
+            ls.pop()
+        ind = min((len(ln) - len(ln.lstrip(" ")) for ln in ls if ln), default=0)
+        if ind > 0:
+            ls = [ln[ind:] if ln else "" for ln in ls]
+        out = "\n".join(ls)
+        if len(out) > CAPTION_MAX_LEN:
+            out = out[:CAPTION_MAX_LEN].rstrip()
+        return out
+    except Exception:
+        return ""
+
+
+_LINE_H: dict = {}
+
+
+def caption_line_height(font_id) -> float:
+    """From one line of a caption to the next, as a share of the letter size, for a font of CAPTION_FONTS: the
+    font's own line height, which is what drawtext uses (the Studio's preview spaces its lines by it). 1.17 when
+    the font cannot be read."""
+    k = str(font_id or "")
+    if k not in _LINE_H:
+        v = 1.17
+        try:
+            from PIL import ImageFont
+            f = ImageFont.truetype(caption_font_file(font_id), 200)
+            h = f.font.height / 200.0
+            if 0.5 <= h <= 2.5:
+                v = round(h, 4)
+        except Exception:
+            pass
+        _LINE_H[k] = v
+    return _LINE_H[k]
+
+
 def caption_text_arg(text) -> tuple:
     """(extra drawtext option, the escaped text) for a caption. A text with a % or a backslash in it made drawtext
     stop with "Stray %" and draw NOTHING ("50% OFF" never showed): such a text is drawn with expansion=none --
     letter for letter. Every other text: the option and the escaping of before, character for character."""
     t = str(text or "")
     if "%" in t or "\\" in t:
-        return "expansion=none:", t.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\u2019")
-    return "", _esc_text(t)
+        return "expansion=none:", _lead_space(t.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\u2019"))
+    return "", _lead_space(_esc_text(t))
+
+
+def _lead_space(esc: str) -> str:
+    """bot36: a caption whose FIRST line starts with spaces (typed that way to move it right). ffmpeg drops white
+    space at the start of an option's value -- the first line stood 59 px too far left in the real render, the
+    spaces of the later lines were drawn. A backslash before the first space keeps them all. A text that does not
+    start with a space comes back as it is: every caption of before."""
+    return ("\\" + esc) if esc[:1] == " " else esc
 
 
 CORNERS = {

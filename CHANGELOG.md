@@ -1,5 +1,61 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-06 -- bot36 LIVE 02:52, bot36b 03:03: the Studio -- the caption AS TYPED, 12 more fonts, the waiting video's OWN PICTURES
+
+John (two screenshots of the Studio): "I want the caption to appear the way I type, the way I give space, my art
+[U GAAR AH on top, RASHKA BOY MUSALSAL TV under it] ... so good fonts, attractive, modern ... I want to see the
+actual video, just like a timeline: easily see where the logo will be ... without breaking anything".
+- **What was wrong.** The page and the bot both squeezed the caption onto one line (every line break and run of
+  spaces became one space). And the Studio never got pictures of the video that waits in the panel.
+- **Found on the way, by the first real render test:** ffmpeg drops white space at the START of an option's value --
+  the first line of his caption stood 59 px too far left even with the line break kept (the spaces before later
+  lines were drawn). `branding.caption_text_arg` now puts a backslash before the first space, only for a caption
+  that starts with one; every caption of before gives the text of before, character for character.
+- **bot36 (tools/patch_bot_studio36.py):**
+  - `branding.caption_lines(text)`: a caption as typed -- line breaks and spaces kept; only what cannot be seen goes
+    (spaces at a line's end, empty first / last lines, the indent ALL lines share); at most 6 lines, 300 characters.
+    `_cap_clean` (the Studio's save) and `/text` store that; the panels show a caption on one line (" ⏎ ").
+  - 12 more caption fonts, 20 in all (assets/fonts, Debian's own packages, see FONTS.md): League Spartan, Sora,
+    Manrope, Inter, Montserrat Black, Cabin, Yanone Kaffeesatz, Roboto Slab, Quicksand, Comfortaa, Lobster,
+    Dancing Script. `caption_line_height(id)` = the font's own line height = what drawtext uses from one line to
+    the next (measured on all 20); the page spaces its lines by it.
+  - The waiting video's own pictures: when a video waits in the banner flow, /studio cuts one picture from the
+    middle of each of 24 equal parts of it (640 px wide, the shape it is SHOWN in; the first at once = the
+    preview's frame, the rest in the background) and lists them in the opening's frames.json. A waiting dub-sync
+    pair gives the HD film's Telegram thumbnail. Nothing waits / the file is gone / a photo is replied to: as before.
+  - The picture sent after a save draws the caption with the render's own escaping (its lines, its spaces, a %).
+- **The page (web_public/place.html):** the caption is shown and sent as typed (the same cleaning as the bot: one
+  shared list of 20 hand-written cases, 20/20 on both sides); the box is typed in the caption's own font without
+  automatic wrapping; a film strip of the video under the preview (slide = that moment behind the logo and the
+  caption), the timeline exactly as long as the video with its pictures behind the marks; no fake bold on the
+  already-bold fonts; the font tiles three in a row on a phone.
+- **Not touched:** `build_filter` (the render), the engine. The dub-sync engine draws the same caption through the
+  bot's `caption_text_arg` (tested: its own filter, real ffmpeg, two lines, the first moved right).
+- **Proof on copies:** tools/test_bot_studio36.py 43/43 inside the container (no break: brand settings, menus,
+  panels, six one-line render filters character for character; as typed in REAL ffmpeg: the first line 60 px right
+  = its five spaces, the block centred, one line pitch apart; pictures from THEIR moment of a test film; the
+  fall-backs). tools/run_suites36.sh in a separate container while the bot worked on a film: 13 suites, contract and
+  8 earlier tests the same on the live and the patched copy (cutsummary 2 / contract 1 red on both, from before);
+  trailer tests 33 / 34 / 35 pass on both. By design four checks of studio31 / capfont31 no longer hold ("on one
+  line", "8 fonts", the font files before the install). The page driven in a browser on a real staged opening.
+- **After the install:** bot36 installed 02:52 after John's dub-sync job had ended (tools/deploy_bot36.sh: the
+  rebuilt files == the tested ones, backups, rollback ready), bot36b 03:03 (tools/deploy_bot36b.sh). The bot was
+  never restarted while it worked on his film.
+  tools/e2e_studio36.py through Telegram from his account (/studio, the page, cfg.json, every logo, all 20 fonts,
+  an empty save, a same-values save): OK, his 80 stored values equal before and after. The live page opened in a
+  browser at phone width: a real picture of his film behind the logo, the film strip, his two-line caption as typed.
+- **bot36b (same day, found by that live check and by John's second screenshot, "still same"):** (1) he works in
+  the DUB-SYNC set, where a film is not on disk before its job -- the Studio showed nothing while his film ran.
+  `_studio_dub_video`: the HD film of the job that runs, else of his latest one still on the server (found by the
+  title's slug, else by the time its job ran: the queue keeps only 60 letters of a title). Checked on the real
+  case: Stumped's HD (HEVC 10-bit), 24 pictures. (2) After a restart everybody works in the banner set again, and
+  with no video waiting there the picture was empty although his last film was on the server: a set that has no
+  video of its own now shows the other set's. test_bot_studio36.py 53/53; run_suites36.sh 25 suites the same on
+  the live and the patched copy; the upgrade of the installed bot36 == the whole patch on the files of before.
+- **Known, not done:** the famous display fonts that Debian does not package (Poppins, Anton, Oswald, Bangers)
+  would have to come from Google Fonts -- John's word first. A dub-sync film's pictures are the HD file's whole
+  frame (with its black bars when it has them).
+
 ## 2026-10-05 (evening) -- bot35 LIVE 19:06: /trailer -- when the Somali trailer already exists, its REAL sound is the result
 
 John, after the trailers built from the film: "you were creating your own fake, you didn't nail the dialogue as it is

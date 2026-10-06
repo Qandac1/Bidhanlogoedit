@@ -968,7 +968,7 @@ def panel(uid: int, job: dict) -> tuple[str, IKM]:
         f"🎬 **Ready to render**\n"
         f"`{job['name']}`\n"
         f"⏳ {_fmt_hms(dur)}  •  src {job['w']}×{job['h']}\n\n"
-        f"📝 Caption: `{c['scroll_text']}`\n"
+        f"📝 Caption: `{_cap_flat(c['scroll_text'])}`\n"
         f"⏱ Scroll: {c['scroll_seconds']:g}s  •  🔁 {times}\n"
         f"🖼 {res}  •  🎞 {c['fps']}fps  •  📐 {br_label}\n"
         f"🏷 Logos: {', '.join(logos) or 'none'} (size {int(c['logo_scale']*100)}%)\n"
@@ -1230,12 +1230,15 @@ async def _text(_, m: Message):
     if len(m.command) < 2:
         return await m.reply("Usage: `/text ugaar ah bidhaan tv 0619624090`\n"
                              "Remove the caption entirely: /notext")
-    new = m.text.split(None, 1)[1].strip()
+    from branding import caption_lines as _cl
+    new = _cl(m.text.split(None, 1)[1])                # bot36: its line breaks and spaces stay as typed
     if new.lower() in ("off", "none", "clear", "no", "remove", "-"):
         set_user(m.from_user.id, scroll_text="")
         return await m.reply("✅ Caption removed — no scrolling text on your renders.\n"
                              "Set one again with /text <your text>.")
     set_user(m.from_user.id, scroll_text=new)
+    if "\n" in new:
+        return await m.reply("✅ Caption set, as you typed it:\n```\n%s\n```" % new)
     await m.reply(f"✅ Caption set:\n`{new}`")
 
 
@@ -1844,7 +1847,7 @@ def _batch_panel_text(uid: int, n: int) -> str:
     res = _res_label(c)
     return (f"📦 **{n} videos queued**\n"
             f"🟥 Cover: {c['cover_mode']}  •  🖼 {res}  •  🎞 {c['fps']}fps\n"
-            f"📝 `{c['scroll_text']}`\n\n"
+            f"📝 `{_cap_flat(c['scroll_text'])}`\n\n"
             f"They'll be branded **one-by-one automatically**. Pick a preset to "
             f"apply to ALL + start, or render all with current settings.\n"
             f"Send more files to add them. `/cancel` stops the batch.")
@@ -3841,15 +3844,15 @@ def _place_apply(uid: int, items: list, start=None, profile=None) -> list:
 
 def _cap_clean(d) -> dict:
     """The caption part of a Studio save -> settings. A font ID and a colour NAME from branding's lists (anything
-    else: the classic font, white), the text on one line and cut, numbers clamped, at most STUDIO_MAX_TIMES
-    times. {} when nothing usable was sent. Never raises."""
+    else: the classic font, white), the text AS TYPED (bot36: its line breaks and spaces kept, branding.caption_lines)
+    and cut, numbers clamped, at most STUDIO_MAX_TIMES times. {} when nothing usable was sent. Never raises."""
     out = {}
     try:
-        from branding import CAPTION_FONTS, CAPTION_COLORS
+        from branding import CAPTION_FONTS, CAPTION_COLORS, caption_lines
         if not isinstance(d, dict):
             return {}
         if "text" in d:
-            out["scroll_text"] = " ".join(str(d.get("text") or "").split())[:STUDIO_TEXT_MAX]
+            out["scroll_text"] = caption_lines(d.get("text"))
         if "font" in d:
             f = str(d.get("font") or "").strip().lower()
             out["caption_font"] = f if (f in CAPTION_FONTS and f != "classic") else ""
@@ -3904,11 +3907,19 @@ def _trim_clean(d) -> dict:
         return {}
 
 
+def _cap_flat(t) -> str:
+    """A caption on ONE line, for a panel or an answer: a line break shown as " ⏎ ", a run of spaces as one."""
+    try:
+        return " ⏎ ".join(" ".join(ln.split()) for ln in str(t or "").split("\n") if ln.strip())
+    except Exception:
+        return ""
+
+
 def _cap_line(c: dict) -> str:
     """One plain line saying what the caption of a set is."""
     try:
         from branding import CAPTION_FONTS
-        txt = (c.get("scroll_text") or "").strip()
+        txt = _cap_flat(c.get("scroll_text"))
         if not txt:
             return "• Caption: off"
         font = CAPTION_FONTS.get(c.get("caption_font") or "classic", ("Classic", ""))[0]
@@ -3978,13 +3989,16 @@ def _studio_set(uid: int, profile: str, token: str) -> dict:
             "trim": {"mode": c.get("trim_mode") or "off", "a": float(c.get("trim_a") or 0.0), "b": float(c.get("trim_b") or 0.0)}}
 
 
-def _studio_cfg(uid: int, token: str, has_bg: bool, dur: float = 0.0) -> dict:
+def _studio_cfg(uid: int, token: str, has_bg: bool, dur: float = 0.0, frames: bool = False) -> dict:
     """Everything the Studio page needs, written to WEB_PUBLIC/t/<token>/cfg.json: both sets, the font and
-    colour lists, the set the user is working in, the frame, the length of the waiting video."""
-    from branding import CAPTION_FONTS, CAPTION_COLORS
+    colour lists (bot36: each font with its line pitch), the set the user is working in, the frame, the length of
+    the waiting video and (bot36) where the list of that video's own pictures is."""
+    from branding import CAPTION_FONTS, CAPTION_COLORS, caption_line_height
     cfg = {"v": 3, "active": _profile_of(uid), "bg": ("t/%s/frame.jpg" % token) if has_bg else "",
            "dur": float(dur or 0.0),
-           "fonts": [{"id": "" if k == "classic" else k, "label": lab, "file": "fonts/" + (fn or "DejaVuSans-Bold.ttf")}
+           "frames": ("t/%s/frames.json" % token) if frames else "",
+           "fonts": [{"id": "" if k == "classic" else k, "label": lab, "file": "fonts/" + (fn or "DejaVuSans-Bold.ttf"),
+                      "lh": caption_line_height(k)}
                      for k, (lab, fn) in CAPTION_FONTS.items()],
            "colors": [{"id": k, "css": "#ffffff" if v == "white" else "#" + v[2:]} for k, v in CAPTION_COLORS.items()],
            "sets": {"banner": _studio_set(uid, "banner", token), "dub": _studio_set(uid, "dub", token)}}
@@ -4026,6 +4040,170 @@ def _studio_waiting_dur(uid: int) -> float:
         return 0.0
 
 
+# ---- bot36: THE WAITING VIDEO'S OWN PICTURES in the Studio (John 2026-10-06: "I want to see the actual video,
+# just like a timeline ... easily see where the logo will be"). A banner job's video is on disk as soon as its
+# panel shows: one picture from the middle of each of STUDIO_FRAMES equal parts of it goes into the opening's
+# folder, listed in frames.json as they come; the page shows them as a film strip and behind the logo.
+STUDIO_FRAMES = 24
+STUDIO_FRAME_W = 640            # px wide: about 40 KB a picture
+_studio_tasks: dict = {}        # uid -> the task that is filling his film strip
+
+
+def _studio_frame_times(dur: float, n: int = STUDIO_FRAMES) -> list:
+    """The middle of each of n equal parts of a video of dur seconds."""
+    try:
+        return [round(float(dur) * (i + 0.5) / n, 2) for i in range(n)] if float(dur) > 0 else []
+    except Exception:
+        return []
+
+
+def _studio_dub_video(uid: int) -> tuple:
+    """(file, seconds) of the HD film of the user's dub-sync job -- the one that runs now, else his latest one whose
+    HD is still on the server (the engine keeps a film's sources for about a day) -- or ("", 0.0).
+    John 2026-10-06 02:38: he opened the Studio on "Dub-sync films" while a film was running and the picture was
+    empty. The film is found by its title's slug (raw/<slug>_hd_ORIG.*), else by the time its job ran (the queue
+    keeps only the first 60 letters of a title, and the slug's last part is made from the whole name)."""
+    try:
+        import glob as _glob
+        import dub_queue as _dq
+        import dubsync_job as _dj
+        hds = [p for p in _glob.glob(os.path.join(str(_dj.RAW_DIR), "*_hd_ORIG.*"))
+               if ".det." not in os.path.basename(p) and os.path.isfile(p)]
+        if not hds:
+            return "", 0.0
+        mine = [e for e in list(getattr(_dq, "_q", None) or []) if str(e.get("uid")) == str(uid) and e.get("title")]
+        mine.sort(key=lambda e: (e.get("state") == "running", float(e.get("started") or e.get("added") or 0.0)), reverse=True)
+        now = time.time()
+        for e in mine[:6]:
+            slug = _dj._slug(str(e["title"]))
+            pick = [p for p in hds if os.path.basename(p).startswith(slug + "_hd_ORIG.")]
+            t0 = float(e.get("started") or 0.0)
+            if not pick and t0 > 0:
+                t1 = float(e.get("ended") or now)
+                pick = [p for p in hds if t0 - 5 <= os.path.getmtime(p) <= t1 + 5]
+            for p in sorted(pick, key=os.path.getmtime, reverse=True):
+                dur = float(probe(p)[2] or 0.0)
+                if dur > 1.0:
+                    return p, dur
+    except Exception:
+        pass
+    return "", 0.0
+
+
+def _studio_waiting_video(uid: int) -> tuple:
+    """(file, seconds) of the video whose own pictures the Studio shows, or ("", 0.0). The set the user works in
+    comes first -- BANNER: the video that waits in the panel (downloaded already); DUB-SYNC: the HD film of the job
+    that runs, or of the latest one still on the server (_studio_dub_video) -- and when that set has no video, the
+    OTHER set's is shown (bot36b: after a restart everybody works in the banner set again, and the Studio came up
+    empty although his last film was on the server; a real picture of his is better than none)."""
+    def _banner(_uid):
+        job = _pending.get(_uid) or {}
+        src, dur = str(job.get("src") or ""), float(job.get("duration") or 0.0)
+        return (src, dur) if (src and dur > 1.0 and os.path.isfile(src)) else ("", 0.0)
+    order = (_studio_dub_video, _banner) if _profile_of(uid) == "dub" else (_banner, _studio_dub_video)
+    for f in order:
+        try:
+            got = f(uid)
+            if got and got[0]:
+                return got
+        except Exception:
+            pass
+    return "", 0.0
+
+
+def _studio_waiting_msg(uid: int):
+    """The HD film's message of a dub-sync pair that waits (its Telegram thumbnail becomes the Studio's picture:
+    the film itself is not downloaded yet); None otherwise."""
+    try:
+        if _profile_of(uid) == "dub":
+            sel = _dubsel.get(uid) or {}
+            msgs = sel.get("msgs") or []
+            if len(msgs) == 2:
+                return msgs[sel.get("hd_i", 0)]
+    except Exception:
+        pass
+    return None
+
+
+async def _studio_grab(src: str, t: float, out: str, timeout: float = 25.0) -> bool:
+    """One picture of the video at second t: a JPEG STUDIO_FRAME_W wide in the picture's true shape. ffmpeg jumps
+    to the key frame before t, so it is quick on a long film. Best effort: False on any failure; never raises
+    (a cancel goes through), never leaves ffmpeg running."""
+    pr = None
+    try:
+        pr = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-v", "error", "-y", "-ss", "%.2f" % max(0.0, float(t)), "-i", src, "-map", "0:v:0", "-frames:v", "1",
+            "-vf", "scale=iw*sar:ih,scale=%d:-2,setsar=1" % STUDIO_FRAME_W, "-q:v", "6", out,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(pr.wait(), timeout=timeout)
+        return pr.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 400
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+    finally:
+        try:
+            if pr is not None and pr.returncode is None:
+                pr.kill()
+        except Exception:
+            pass
+
+
+def _studio_frames_write(d: str, token: str, dur: float, got: dict, done: bool) -> None:
+    """frames.json of an opening: the pictures there are so far (written whole, then moved into place)."""
+    tmp = os.path.join(d, "frames.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump({"v": 1, "dur": float(dur), "n": STUDIO_FRAMES, "done": bool(done),
+                   "frames": [{"i": i, "t": got[i], "img": "t/%s/f_%02d.jpg" % (token, i)} for i in sorted(got)]}, f)
+    os.replace(tmp, os.path.join(d, "frames.json"))
+
+
+async def _studio_frames_fill(src: str, dur: float, d: str, token: str, got: dict) -> None:
+    """The rest of the film strip, in the background: spread first (every 4th part, then the gaps), the list
+    rewritten after each picture so the open page shows them as they come. Stops when the folder is gone."""
+    try:
+        times = _studio_frame_times(dur)
+        n = len(times)
+        for i in list(range(0, n, 4)) + list(range(2, n, 4)) + list(range(1, n, 2)):
+            if i in got:
+                continue
+            if not os.path.isdir(d):
+                return
+            if await _studio_grab(src, times[i], os.path.join(d, "f_%02d.jpg" % i)):
+                got[i] = times[i]
+                _studio_frames_write(d, token, dur, got, False)
+        if os.path.isdir(d):
+            _studio_frames_write(d, token, dur, got, True)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception("studio: the film strip could not be finished")
+
+
+async def _studio_frames_start(uid: int, src: str, dur: float, d: str, token: str) -> bool:
+    """The first picture now (it is also the preview's frame), the others in the background. False: no picture
+    could be cut from the video -- the Studio opens as before."""
+    try:
+        times = _studio_frame_times(dur)
+        if not times:
+            return False
+        i0 = len(times) // 8
+        first = os.path.join(d, "f_%02d.jpg" % i0)
+        if not await _studio_grab(src, times[i0], first):
+            return False
+        shutil.copyfile(first, os.path.join(d, "frame.jpg"))
+        got = {i0: times[i0]}
+        _studio_frames_write(d, token, dur, got, False)
+        old = _studio_tasks.pop(uid, None)
+        if old is not None and not old.done():
+            old.cancel()
+        _studio_tasks[uid] = asyncio.create_task(_studio_frames_fill(src, dur, d, token, got))
+        return True
+    except Exception:
+        log.exception("studio: the video's pictures could not be started")
+        return False
+
+
 async def _place_open(m: Message, uid: int, src: Message | None = None) -> None:
     """Send the keyboard button that opens the Studio. `src`: a photo / video whose picture becomes the frame."""
     import secrets
@@ -4035,6 +4213,8 @@ async def _place_open(m: Message, uid: int, src: Message | None = None) -> None:
     d = os.path.join(WEB_PUBLIC, "t", token)
     os.makedirs(d, exist_ok=True)
     has_bg = False
+    if src is None:
+        src = _studio_waiting_msg(uid)                 # bot36: a waiting dub-sync pair -> the HD film's thumbnail
     try:
         if src is not None and src.photo:
             await src.download(file_name=os.path.join(d, "frame.jpg"))
@@ -4046,7 +4226,12 @@ async def _place_open(m: Message, uid: int, src: Message | None = None) -> None:
     except Exception:
         log.exception("studio: the frame could not be fetched")
     has_bg = has_bg and os.path.exists(os.path.join(d, "frame.jpg"))
-    cfg = _studio_cfg(uid, token, has_bg, _studio_waiting_dur(uid))
+    frames = False
+    if not has_bg:                                     # bot36: the video that waits in the panel -> its own pictures
+        vsrc, vdur = await asyncio.to_thread(_studio_waiting_video, uid)
+        if vsrc:
+            frames = has_bg = await _studio_frames_start(uid, vsrc, vdur, d, token)
+    cfg = _studio_cfg(uid, token, has_bg, _studio_waiting_dur(uid), frames)
     if not cfg["sets"]["banner"]["logos"] and not cfg["sets"]["dub"]["logos"]:
         shutil.rmtree(d, ignore_errors=True)
         await m.reply("No logo image was found. Upload yours first: /logo")
@@ -4072,10 +4257,10 @@ async def _place_preview(m: Message, uid: int, profile=None) -> None:
     """A picture of the result made by the REAL render filter (best effort; never breaks the save)."""
     try:
         import tempfile
-        from branding import build_filter, caption_font_file, caption_color, _esc_text
+        from branding import build_filter, caption_font_file, caption_color, _esc_text, caption_text_arg, caption_lines
         pay = _brand_payload(uid, profile)
         logos = [Logo(**lg) for lg in pay["logos"] if os.path.exists(lg["path"])]
-        txt = (pay.get("scroll_text") or "").strip()
+        txt = caption_lines(pay.get("scroll_text"))    # bot36: as typed (a strip() took the first line's own spaces)
         if not logos and not txt:
             return
         bg = os.path.join(_place_last.get(uid) or "", "frame.jpg")
@@ -4095,9 +4280,10 @@ async def _place_preview(m: Message, uid: int, profile=None) -> None:
         last = "outv"
         if txt:                                        # the caption as it looks, standing near the bottom
             fs = max(14, int(H * float(pay.get("caption_scale") or 0.016)))
-            fc += (";[outv]drawtext=fontfile=%s:text='%s':fontcolor=%s:fontsize=%d:borderw=2:bordercolor=black@0.9:"
-                   "x=(w-text_w)/2:y=h*0.86-text_h/2[pv]" % (caption_font_file(pay.get("caption_font", "")), _esc_text(txt),
-                                                              caption_color(pay.get("caption_color", "white")), fs))
+            _xp, _tx = caption_text_arg(txt)           # the render's own escaping: lines, spaces, a % letter for letter
+            fc += (";[outv]drawtext=fontfile=%s:%stext='%s':fontcolor=%s:fontsize=%d:borderw=2:bordercolor=black@0.9:"
+                   "x=(w-text_w)/2:y='min(h*0.86-text_h/2,h-text_h-6)'[pv]" % (caption_font_file(pay.get("caption_font", "")), _xp, _tx,
+                                                                              caption_color(pay.get("caption_color", "white")), fs))
             last = "pv"
         out = os.path.join(tempfile.gettempdir(), "studio_%d.jpg" % uid)
         dummy = logos[0].path if logos else _asset(settings.cover_png)
