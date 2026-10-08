@@ -3,7 +3,7 @@
 Generalised from the proven /tmp/send_skips.py (side-by-side clips, 2026-09-25).
 Usage:
   saved_send.py --header "text" [--footer "text"] --manifest items.json
-      items.json = [{"path": "/x/clip_01.mp4", "caption": "..."}, ...]
+      items.json = [{"path": "/x/clip_01.mp4", "caption": "..."}, ...]  ("as": "document" = send the file untouched)
   saved_send.py --header "text" FILE [FILE ...]          (caption = file name)
 Videos go as streaming video, images as photos, everything else as a document. Prints "sent N/M".
 Run with /opt/media-os/venv/bin/python (pyrogram).
@@ -91,7 +91,9 @@ async def main(a):
         for it in items:
             p, cap = it["path"], it.get("caption", "")[:1000]
             try:
-                if p.lower().endswith(VIDEO):
+                if it.get("as") == "document":  # untouched file (alpha .mov, transparent .png)
+                    await app.send_document("me", p, caption=cap, file_name=it.get("file_name") or os.path.basename(p))
+                elif p.lower().endswith(VIDEO):
                     dur, w, h, th = video_meta(p)
                     last = [-10]
 
