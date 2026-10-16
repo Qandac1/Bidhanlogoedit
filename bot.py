@@ -3235,6 +3235,47 @@ async def _run_dubsync(uid: int, msgs: list, hd_i: int = 0,
                 pass
 
 
+async def _complete_download(m, dest, path, progress=None, waits=(5, 15, 30)):
+    """bot38 (10-17): the file as Telegram has it, or a clear message - never a half file read as a film. A download
+    that came out shorter than the file (or not at all) is downloaded again a few seconds later, up to three times,
+    the partial file removed first. A file whose size Telegram does not give is taken as it came (as before)."""
+    media = (getattr(m, "video", None) or getattr(m, "document", None) or getattr(m, "animation", None)
+             or getattr(m, "audio", None))
+    want = int(getattr(media, "file_size", 0) or 0)
+
+    def size(x):
+        try:
+            return os.path.getsize(x) if x else -1
+        except OSError:
+            return -1
+
+    def whole(x):
+        n = size(x)
+        return bool(x) and (n == want if want else n > 0)
+    if whole(path):
+        return path
+    got = size(path)
+    for k, wait in enumerate(waits):
+        log.warning("download of %s came out at %s of %s bytes - downloading it again in %d s (try %d)",
+                    dest, got, want, wait, k + 2)
+        await asyncio.sleep(wait)
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        try:
+            path = await m.download(file_name=dest, progress=progress)
+        except Exception as e:  # noqa: BLE001 - any refusal: the next try, then the clear message
+            log.warning("download try %d failed: %s", k + 2, str(e)[:160])
+            path = None
+        got = size(path)
+        if whole(path):
+            log.info("download complete on try %d: %s", k + 2, dest)
+            return path
+    raise RuntimeError("Telegram stopped the download of this file (%s of %s arrived, tried %d times) - nothing was "
+                       "lost: send it again" % (human_size(max(0, got)), human_size(want), len(waits) + 1))
+
+
 async def _build_job(uid: int, m: Message, status: Message,
                      prog=None, key: str = "") -> dict:
     """Download the file (Telegram video/doc OR a MEGA link in the message) to a
@@ -3305,6 +3346,9 @@ async def _build_job(uid: int, m: Message, status: Message,
             path = None
         if not path:
             path = await m.download(file_name=dest, progress=_dlp)
+        # bot38: a download Telegram cut short (another data centre refusing the login burst - AUTH_BYTES_INVALID,
+        # 10-16 Hope / 10-07 Harom Hara: an empty src.mp4 reached ffprobe) is downloaded again before anything reads it
+        path = await _complete_download(m, dest, path, _dlp)
         name = _derive_name(m)
     if not cache_hit and ckey and path:
         _cache_put(ckey, path)

@@ -1,5 +1,23 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-17 -- bot38 LIVE 00:44: a download Telegram cut short is downloaded again before the bot reads it
+
+John 10-17 ("I keep getting many errors since this month started"): two October jobs died with "❌ Dub-sync failed:
+Command ffprobe ... src.mp4 returned non-zero exit status 1" (10-07 Harom Hara, 10-16 Hope).
+- **What was wrong (the bot's own log, Hope 10-16 04:07):** the HD sat on another Telegram data centre (DC5); the fast
+  download opens several connections at once and Telegram refused that burst of logins (`AUTH_BYTES_INVALID` on
+  `auth.ImportAuthorization`); the normal download it fell back to hit the same refusal - and pyrogram left an EMPTY
+  src.mp4, which went straight to ffprobe. Sent again minutes later, the same files worked.
+- **bot38 (tools/patch_bot_dlretry38.py, bot.py only, additions only):** `_complete_download` after every Telegram
+  download: the file the size Telegram says it is goes on exactly as before (no new call, no wait); shorter or missing
+  -> downloaded again after 5 / 15 / 30 s, the partial file removed first; still not whole -> "Telegram stopped the
+  download of this file (x of y arrived, tried 4 times) - nothing was lost: send it again". A file whose size
+  Telegram does not give is taken as it came, as before. The MEGA path is untouched.
+- **Proof:** tools/test_dlretry38.py inside the container, on copies: 8/8 (a whole download untouched; the empty Hope
+  file re-downloaded; AUTH_BYTES_INVALID then a good try; never whole -> the clear message; no size -> as before;
+  bot.py only gains lines, compiles). The same test on the unpatched bot: 7 FAILED. Deployed only with the bot idle,
+  the container's bot.py == the tested copy (39789e51fc09); backup /opt/dubsync2/scratch/pre-bot38-20261017-0044.
+
 ## 2026-10-06 -- bot36 LIVE 02:52, bot36b 03:03: the Studio -- the caption AS TYPED, 12 more fonts, the waiting video's OWN PICTURES
 
 John (two screenshots of the Studio): "I want the caption to appear the way I type, the way I give space, my art
