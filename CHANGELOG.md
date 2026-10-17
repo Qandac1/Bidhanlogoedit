@@ -1,5 +1,37 @@
 # Bidhaan Logo-Edit — Changelog
 
+## 2026-10-17 -- bot39b+c LIVE 05:20: a zoomed copy the frame check refused gets its zoom measured and is analysed again; the NOT CLEAN picture line says what the unproven shots are
+
+John 10-17 ("some movie bot was refuse ... find out everything ... logic and tests, verify and proof it"):
+- **Aegan 2008 refused twice (10-12, 10-14) "84% of the dub's shots could not be found" -- wrongly.** The picture search
+  had matched 96% of its shots; the Fanproj copy is a ZOOMED window of the HD (the middle 75-78% x 85-89%, shifted
+  up 7-9%: the kept thumbnails, pair_zoom's grid, ORB on the analysis's own matches all agree). The plain pair check
+  matched 2.7% of keyframes -> 5 chain steps (< 40) -> verdict "unknown" -> the bot measured no zoom; the weak-analysis
+  remedy (bot25) only looks at ACCEPTED analyses, so the refusal went straight to John.
+- **bot39b (tools/patch_bot_refusedzoom39.py, dubsync_job.py, additions only):** a refused, not-short pair whose shots
+  the picture search found >= 90% (the right refusals measured 60-84%: Alias Janaki, a different trailer cut, Patth,
+  Stumped) and that has no window: the zoom search runs; its window counts when it clearly beats the plain framing
+  (as bot25) or lines up all through and ORB measures a real zoom (<= 92% of the HD's width); else the window ORB
+  measures on the analysis's own matched shots (engine tools/edl_zoom.py: >= 6 pairs, the copy's shape, the grid
+  agrees). Window saved, old analyses moved aside, analysed once more -- the engine's frame check judges again.
+  Nothing found -> the refusal as before + "The zoom was measured too: no zoomed framing explains it."
+- **bot39c (tools/patch_bot_pictext39.py, words only):** "only 91.1% of 146 shots ... (13 are wrong or unproven: 0
+  placed wrong, 2 HD picture the copy does not have, 11 too short / dark to check)"; with no shot placed wrong the
+  advice points at the spots instead of "another version / zoomed" (the Matchbox trailer: the 11 were 0.52 s flashes,
+  all correct by eye; the real fault = the HD's YouTube end screen in the last 8 s).
+- **Proof:** test_refusedzoom39.py 23/23 and test_pictext39.py 7/7 inside the container on copies (the real numbers
+  of Aegan / G20 / the refused pairs; clean and lips-only reports byte-identical). END TO END on Aegan itself
+  (tools/e2e_refusedzoom39.py: the bot's own prepare_inputs + run_dubsync on the real pair, fetched AS THE BOT with
+  tools/fetch_bot_msgs.py, nothing sent to Telegram): refused 84.33% -> zoom 10/10 parts (plain 0) -> re-analysed
+  1.39% unconfirmed -> rendered, gate passed, picture check 96.8% of 3382 (0 wrong, 0 no_hd), dialogue GREEN, 0
+  unjustified cuts, opening 141 s restored (through the 10-17 insert fix), lip sync -0.10 s. Watched: 4 dub-vs-file
+  sheets (opening credits second by second, a song mid-film, a fight near the end) -- the same moments everywhere.
+  Found there, NOT changed: the 12 s "HD intro" kept at the start is the HD uploader's card ("Our Sincere Thanks to
+  ... @PrinceEncodes"). Deployed only with the bot idle; container == tested (a6078fd85e12); backup
+  /opt/dubsync2/scratch/pre-bot39bc-20261017-0520.
+- Seen in the log, John's to fix: the premium login is EXPIRED since 10-15 (AUTH_KEY_UNREGISTERED -> /loginpremium);
+  MEGA "OUT OF SPACE" on 10-12 and 10-15 (8 failures) -- films over 2 GB cannot go out at full size until then.
+
 ## 2026-10-17 -- bot38 LIVE 00:44: a download Telegram cut short is downloaded again before the bot reads it
 
 John 10-17 ("I keep getting many errors since this month started"): two October jobs died with "❌ Dub-sync failed:

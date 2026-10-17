@@ -837,6 +837,40 @@ async def run_dubsync(
                     done_weight -= weight
                     i -= 1
                     continue
+                # SELF-REPAIR 3 (bot39, Aegan 10-12 / 10-14): refused by the FRAME check while the picture search FOUND
+                # the shots (Aegan: 96% strong, 84% unconfirmed by frames) = a ZOOMED Somali copy no window described.
+                # The weak-analysis remedy (bot25) for a refused pair: measure the zoom; a real zoom that lines the films
+                # up -> saved, old analyses moved aside, analysed once more (the engine's frame check judges again).
+                if not _zoom_gate and _hd_window_of(title) is None and not _short_pair(hd, dub):
+                    _sh = _strong_share(_work_dir_for(hd, dub))
+                    if _sh is not None and _sh >= REFUSED_ZOOM_MIN_STRONG:
+                        _zoom_gate = True
+                        _z = await _zoom_search(hd, dub)
+                        stats["refused_zoom"] = {k: _z.get(k) for k in ("zoom_parts", "plain_small_parts", "zoom_window",
+                                                                        "zoom_orb_window", "zoom_orb_parts", "zoom_error")
+                                                 if k in _z}
+                        stats["refused_zoom"]["found_share"] = round(_sh, 3)
+                        _win = _z.get("zoom_window") if _refused_zoom_ok(_z) else None
+                        if _win is None:
+                            # the zoom search's own evidence is too weak on a poor copy (Aegan: the right window, 5 of
+                            # 10 parts): the window measured on the ANALYSIS's matched shots (tools/edl_zoom.py)
+                            _e = await _edl_zoom(_work_dir_for(hd, dub), hd, dub)
+                            stats["refused_zoom"]["edl"] = {k: _e.get(k) for k in ("orb_window", "orb_pairs", "pairs_tried",
+                                                                                   "shape_dev", "window", "error") if k in _e}
+                            if _edl_zoom_ok(_e, _z):
+                                _win = _e["window"]
+                        if _win and _save_hd_window(title, _win):
+                            stats["refused_zoom"]["used_window"] = [round(float(x), 4) for x in _win]
+                            stats["refused_parked"] = _park_title_work(title, _work_dir_for(hd, dub))
+                            stats.setdefault("contract_healed", []).append(
+                                "placement refused (%s%% of shots unconfirmed by their frames) although the picture "
+                                "search found %d%% of the shots: the Somali copy is ZOOMED -- it shows the middle %d%% x "
+                                "%d%% of the HD picture; analysed again with that framing"
+                                % (_co.get("unconfirmed_pct"), round(100 * _sh), round(float(_win[0]) * 100),
+                                   round(float(_win[1]) * 100)))
+                            done_weight -= weight
+                            i -= 1
+                            continue
                 _pct = _co.get("unconfirmed_pct")
                 stats["placement"] = str(_co.get("reason", ""))
                 return DubResult(
@@ -853,6 +887,7 @@ async def run_dubsync(
                        if stats.get("speed_retry") else "")
                     + ("(Short clip: analysed twice, the second time with its picture measured inside the clip "
                        "-- still refused.)\n" if "short_geom_retry" in stats else "")
+                    + ("(%s)\n" % _refused_zoom_note(stats) if "refused_zoom" in stats else "")
                     + "Send an HD of the SAME version the dub was made from "
                     "(e.g. the WEB-DL / OTT release, not a PreDVD/cam copy), "
                     "then run /dub again.", stats)
@@ -1431,6 +1466,29 @@ def _sync_fault_lines(sf: dict, limit: int = 6) -> list:
     return out
 
 
+def _pic_split(pc: dict) -> str:
+    """': 0 placed wrong, 2 pictures the HD does not have, 11 too short / dark to check' -- the picture check's own
+    counts (bot39c); '' when they are not all there. Never raises."""
+    try:
+        n, ok, wrong, nohd = (int(pc[k]) for k in ("checked", "ok", "wrong", "no_hd"))
+        unsure = n - ok - wrong - nohd
+        if unsure < 0:
+            return ""
+        return ": %d placed wrong, %d HD picture the copy does not have, %d too short / dark to check" % (wrong, nohd, unsure)
+    except Exception:
+        return ""
+
+
+def _only_unproven(bad: list, st: dict) -> bool:
+    """True when the picture line is the only NOT CLEAN reason and the picture check placed NO shot wrong."""
+    try:
+        pc = st.get("picture_check") or {}
+        return (len(bad) == 1 and str(bad[0]).startswith("picture:") and "wrong" in pc
+                and int(pc["wrong"]) == 0)
+    except Exception:
+        return False
+
+
 def _quality_fail(st: dict, title: str) -> list:
     """The measured rules a delivery breaks (plain lines for the top of the report); [] = clean. Never raises."""
     bad = []
@@ -1438,8 +1496,8 @@ def _quality_fail(st: dict, title: str) -> list:
         _pc = st.get("picture_check") or {}
         if _pc.get("ok_pct") is not None and float(_pc["ok_pct"]) < PIC_OK_MIN:
             _n = int(_pc.get("checked") or 0)
-            bad.append("picture: only %.1f%% of %s shots show what the Somali copy shows (%d are wrong or unproven)"
-                       % (float(_pc["ok_pct"]), _n or "the", max(0, _n - int(_pc.get("ok") or 0))))
+            bad.append("picture: only %.1f%% of %s shots show what the Somali copy shows (%d are wrong or unproven%s)"
+                       % (float(_pc["ok_pct"]), _n or "the", max(0, _n - int(_pc.get("ok") or 0)), _pic_split(_pc)))
     except Exception:
         pass
     try:
@@ -1698,6 +1756,90 @@ def _zoom_gain(z: dict) -> bool:
             and int(z.get("zoom_parts", 0)) >= int(z.get("plain_small_parts", 99)) + ZOOM_GATE_MIN_GAIN
     except Exception:
         return False
+
+
+REFUSED_ZOOM_MIN_STRONG = 0.90  # bot39: a REFUSED pair whose shots the picture search found this well (Aegan 0.96;
+                                # the right refusals: Alias Janaki 0.73, a different trailer cut 0.60, Patth 0.77, Stumped 0.84)
+REFUSED_ZOOM_MAX_SHARE = 0.92   # ...gets a window only when the copy shows at most this share of the HD's width
+
+
+def _strong_share(work) -> "float | None":
+    """Share of the body shots the picture search matched strongly (visual_conf >= 0.70) in the work dir's edl.json;
+    None when there is no such record or fewer than 50 body shots. Never raises."""
+    try:
+        edl = json.loads((Path(work) / "edl.json").read_text()).get("edl") or []
+        body = [e for e in edl if not e.get("is_intro_cluster") and e.get("hd_idx") is not None]
+        if len(body) < 50:
+            return None
+        return sum(1 for e in body if (e.get("visual_conf") or 0) >= 0.70) / float(len(body))
+    except Exception:
+        return None
+
+
+def _refused_zoom_ok(z: dict) -> bool:
+    """For a pair the frame check REFUSED while its shots were found: the zoom search's window counts when it clearly
+    beats the plain framing (_zoom_gain), or when it lines the films up all through (>= ZOOM_GATE_MIN_PARTS, grid and
+    ORB) and ORB features measure a REAL zoom (at most REFUSED_ZOOM_MAX_SHARE of the HD's width, grid within 0.05)."""
+    try:
+        if _zoom_gain(z):
+            return True
+        w, o = z.get("zoom_window"), z.get("zoom_orb_window")
+        return (bool(w) and len(w) == 4 and bool(o) and len(o) == 4
+                and int(z.get("zoom_parts", 0)) >= ZOOM_GATE_MIN_PARTS
+                and int(z.get("zoom_orb_parts", 0)) >= ZOOM_GATE_MIN_PARTS
+                and float(o[0]) <= REFUSED_ZOOM_MAX_SHARE and abs(float(o[0]) - float(w[0])) <= 0.05)
+    except Exception:
+        return False
+
+
+EDL_ZOOM_CMD = ["/opt/dubsync2/.venv/bin/python", "/opt/dubsync2/tools/edl_zoom.py"]
+EDL_ZOOM_TIMEOUT_S = 900
+EDL_ZOOM_MIN_PAIRS = 6        # frame pairs ORB measured (Aegan 10 of 60; a clean unzoomed film 54 of 60, window 1.0)
+EDL_ZOOM_MAX_SHAPE_DEV = 0.03 # a zoom keeps the copy's shape: |zy - zx * HD aspect / dub aspect| (Aegan 0.000)
+EDL_ZOOM_GRID_AGREE = 0.06    # ...and the zoom search's own best grid window says the same width (Aegan 0.75 vs 0.778)
+
+
+async def _edl_zoom(work, hd, dub) -> dict:
+    """tools/edl_zoom.py's JSON for the pair (the window ORB measures on the analysis's matched shots); any failure =
+    {"error": ...}. Never raises."""
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *EDL_ZOOM_CMD, str(work), str(hd), str(dub),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=EDL_ZOOM_TIMEOUT_S)
+        return json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
+    except Exception as exc:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _edl_zoom_ok(e: dict, z: dict) -> bool:
+    """The analysis-measured window counts when ORB measured it on enough frame pairs, it is a real zoom (at most
+    REFUSED_ZOOM_MAX_SHARE of the HD's width) of the copy's own shape, and the zoom search's best grid window agrees."""
+    try:
+        o, w, g = e.get("orb_window"), e.get("window"), z.get("zoom_grid_window")
+        return (bool(o) and len(o) == 4 and bool(w) and len(w) == 4 and bool(g) and len(g) == 4
+                and int(e.get("orb_pairs", 0)) >= EDL_ZOOM_MIN_PAIRS
+                and float(o[0]) <= REFUSED_ZOOM_MAX_SHARE
+                and float(e.get("shape_dev", 9.0)) <= EDL_ZOOM_MAX_SHAPE_DEV
+                and abs(float(g[0]) - float(o[0])) <= EDL_ZOOM_GRID_AGREE)
+    except Exception:
+        return False
+
+
+def _refused_zoom_note(stats: dict) -> str:
+    """One line for the refusal message: what the zoom remedy did."""
+    z = stats.get("refused_zoom") or {}
+    w = z.get("used_window")
+    if stats.get("refused_parked") is not None and w:
+        return ("Analysed twice: the second time with the Somali copy's zoom (the middle %d%% x %d%% of the HD "
+                "picture) -- still refused." % (round(w[0] * 100), round(w[1] * 100)))
+    return "The zoom was measured too: no zoomed framing explains it."
 
 
 def _media_s(p) -> float:
@@ -2457,6 +2599,9 @@ def summary_caption(title: str, res: DubResult, dur_s: float, size_b: int) -> st
             lines.append("   · " + _x)
         if all(str(_x).startswith("lips:") for _x in _bad):
             lines.append("   Watch the ⚠️ lips spots below (film times) before posting; tell Claude.")
+        elif _only_unproven(_bad, st):
+            lines.append("   No shot is placed wrong. At the 🔁 spots below the film shows HD picture the Somali copy "
+                         "does not have (an end card, a logo?) -- watch them before posting; tell Claude.")
         else:
             lines.append("   Most likely this HD is not the version the Somali copy was made from, or the copy is "
                          "reframed/zoomed. Watch the 🔁 spots below; tell Claude before posting.")
